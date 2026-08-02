@@ -156,6 +156,19 @@ def get_time_bonus(cfg: dict) -> int:
     elif h >= 22 or h < 6: return cfg.get("night_boost", 15)
     return 0
 
+CLOSING_PHRASES = ["晚安", "睡吧", "早点歇", "先忙", "明儿见", "拜拜", "先下", "不聊",
+                 "睡了", "歇着吧", "关店", "打烊", "明天见", "明天再说", "睡吧"]
+
+def is_closing_line(text: str) -> bool:
+    """快速判断一句话是否已是结束语/收尾（规则兜底，不调LLM）"""
+    t = text.strip()
+    if not t:
+        return True
+    # 极短应承：嗯/好/行/哦/哈哈 等
+    if len(t) <= 8 and any(w in t for w in ["嗯", "好", "行", "哦", "哈哈", "ok", "知道", "是啊"]):
+        return True
+    return any(w in t for w in CLOSING_PHRASES)
+
 def is_in_sleep_window(cfg: dict) -> bool:
     """判断当前是否处于睡眠时间窗（支持跨天，如 23:00-7:00）"""
     try:
@@ -188,6 +201,7 @@ class TwinSoulPlugin(Star):
         super().__init__(context)
         self.config = load_config()
         self._running = False
+        self._emergency_stop = False
         self._task: Optional[asyncio.Task] = None
         self._bot_map: dict = {}
         self.context_memory = load_context()
@@ -436,8 +450,14 @@ class TwinSoulPlugin(Star):
             )
             if not provider: return False
             judge_prompt = f"""判断下面这句话是否是一个话题的自然结束。
-如果是日常闲聊的自然收尾（晚安、先忙了、好的、嗯、哈哈、知道了、行这类简单应承，或只是在重复客套），回答 NO。
-如果话里还有继续聊下去的空间（疑问、反问、分享、吐槽、提到新话题），回答 YES。
+出现以下情况回答 NO（终止本轮对话）：
+- 晚安、睡吧、早点歇、先忙了、明儿见、拜拜、睡了 等告别或收尾
+- 只是简单应承：嗯、好的、知道了、行、哈哈、哦、是啊
+- 在重复前面已经说过的内容（车轱辘话、客套话来回拉扯）
+- 话题已聊尽，没有新信息可接
+出现以下情况回答 YES（继续回复）：
+- 提出疑问、反问、邀请对方说话
+- 分享新信息、吐槽、提到新话题
 只回答 YES 或 NO，不要多余内容。
 
 对方最后一句话：{last_reply}"""
@@ -450,7 +470,7 @@ class TwinSoulPlugin(Star):
                 result = ret.completion_text.strip().upper()
                 go = "YES" in result
                 if self.config.get("debug_log", True):
-                    logger.info(f"[twinsoul]   结束判断: 「{last_reply[:30]}」→ {'继续聊' if go else '结束'}")
+                    logger.info(f"[twinsoul]   状态判定(LLM): 「{last_reply[:30]}」→ {'继续回复' if go else '终止本轮对话'}")
                 return go
             return False
         except:
@@ -482,74 +502,93 @@ class TwinSoulPlugin(Star):
         ts = datetime.now().timestamp()
         stop_reason = "normal"
 
-        # 发起者先说话
-        if roll <= wc:
-            first_speaker_qq, first_speaker_persona = wq, wp
-            first_speaker_role = "william"
-            second_speaker_qq, second_speaker_persona = zq, zp
-            second_speaker_role = "zaiens"
-        else:
-            first_speaker_qq, first_speaker_persona = zq, zp
-            first_speaker_role = "zaiens"
-            second_speaker_qq, second_speaker_persona = wq, wp
-            second_speaker_role = "william"
-
-        if self.config.get("debug_log", True):
-            logger.info(f"[twinsoul] === 对话轮开始 | 发起={first_speaker_role} | seed={seed[:30]} | 上限{max_rounds}轮 ===")
-        first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed, use_delay=not force)
-        if not first: return
-        round_data.append({"time": ts, "role": first_speaker_role, "text": first, "qq": first_speaker_qq})
-        self._update_context(first_speaker_persona, first, first_speaker_role)
-        last_reply = first
-
-        # 长对话循环
-        for r in range(max_rounds):
-            await asyncio.sleep(random.uniform(2, 6))
-            is_second = (r % 2 == 0)
-            qq = second_speaker_qq if is_second else first_speaker_qq
-            pn = second_speaker_persona if is_second else first_speaker_persona
-            role = second_speaker_role if is_second else first_speaker_role
+        # 互斥：同一时间只允许一个对话轮在跑，防止并发拉扯
+        if getattr(self, "_chat_active", False):
             if self.config.get("debug_log", True):
-                logger.info(f"[twinsoul] --- 轮次{r} | 说话={role} ---")
+                logger.info("[twinsoul] ⏳ 已有对话进行中，本次触发跳过（防并发拉扯）")
+            return
+        self._chat_active = True
+        try:
+            # 发起者先说话
+            if roll <= wc:
+                first_speaker_qq, first_speaker_persona = wq, wp
+                first_speaker_role = "william"
+                second_speaker_qq, second_speaker_persona = zq, zp
+                second_speaker_role = "zaiens"
+            else:
+                first_speaker_qq, first_speaker_persona = zq, zp
+                first_speaker_role = "zaiens"
+                second_speaker_qq, second_speaker_persona = wq, wp
+                second_speaker_role = "william"
 
-            reply = await self._speak_as(
-                group_id, qq, pn, seed,
-                is_long=True, replied_to=last_reply,
-                use_delay=not force
-            )
-            # 失败重试一次，避免对话硬断
-            if not reply:
-                await asyncio.sleep(3)
+            if self.config.get("debug_log", True):
+                logger.info(f"[twinsoul] === 对话轮开始 | 发起={first_speaker_role} | seed={seed[:30]} | 上限{max_rounds}轮 ===")
+            first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed, use_delay=not force)
+            if not first: return
+            round_data.append({"time": ts, "role": first_speaker_role, "text": first, "qq": first_speaker_qq})
+            self._update_context(first_speaker_persona, first, first_speaker_role)
+            last_reply = first
+
+            # 长对话循环
+            for r in range(max_rounds):
+                if self._emergency_stop:
+                    stop_reason = "emergency_stop"
+                    if self.config.get("debug_log", True):
+                        logger.info("[twinsoul] ⛔ 状态判定: 收到急停 → 终止本轮对话")
+                    break
+                await asyncio.sleep(random.uniform(2, 6))
+                is_second = (r % 2 == 0)
+                qq = second_speaker_qq if is_second else first_speaker_qq
+                pn = second_speaker_persona if is_second else first_speaker_persona
+                role = second_speaker_role if is_second else first_speaker_role
+                if self.config.get("debug_log", True):
+                    logger.info(f"[twinsoul] --- 轮次{r} | 说话={role} ---")
+
                 reply = await self._speak_as(
                     group_id, qq, pn, seed,
                     is_long=True, replied_to=last_reply,
-                    use_delay=False
+                    use_delay=not force
                 )
-            if not reply:
-                stop_reason = "no_reply"; break
+                # 失败重试一次，避免对话硬断
+                if not reply:
+                    await asyncio.sleep(3)
+                    reply = await self._speak_as(
+                        group_id, qq, pn, seed,
+                        is_long=True, replied_to=last_reply,
+                        use_delay=False
+                    )
+                if not reply:
+                    stop_reason = "no_reply"; break
 
-            round_data.append({"time": datetime.now().timestamp(), "role": role, "text": reply, "qq": qq})
-            self._update_context(pn, reply, role)
-            last_reply = reply
+                round_data.append({"time": datetime.now().timestamp(), "role": role, "text": reply, "qq": qq})
+                self._update_context(pn, reply, role)
+                last_reply = reply
 
-            # LLM 判断是否该结束（聊得够久才问，省一半调用）
-            if r >= 3:
-                should_stop = not await self._should_continue_chat(reply, group_id)
-                if should_stop:
-                    stop_reason = "llm_judge"; break
+                # 规则兜底：结束语/短应承直接终止（不调LLM，快且准）
+                if is_closing_line(reply) and r >= 1:
+                    stop_reason = "closing_rule"
+                    if self.config.get("debug_log", True):
+                        logger.info(f"[twinsoul] 状态判定(规则): 「{reply[:30]}」→ 终止本轮对话")
+                    break
 
-            # 安全阀：明显告别词（去掉误杀的应承词）
-            end_words = ["先忙了", "晚安", "先下了", "88", "拜拜", "不聊了", "下了"]
-            if any(w in reply for w in end_words):
-                stop_reason = "end_word"; break
+                # LLM 判断（聊得够久才问，省调用）
+                if r >= 3:
+                    should_stop = not await self._should_continue_chat(reply, group_id)
+                    if should_stop:
+                        stop_reason = "llm_judge"; break
+                    if self.config.get("debug_log", True):
+                        logger.info(f"[twinsoul] 状态判定(LLM): 「{reply[:30]}」→ 继续回复")
 
-        logger.info(f"twinsoul: 对话结束，共{r+1}轮，原因={stop_reason}")
+            logger.info(f"twinsoul: 对话结束，共{r+1}轮，原因={stop_reason}")
 
-        if round_data:
-            self._chat_history.extend(round_data)
-            save_history(self._chat_history)
+            if round_data:
+                self._chat_history.extend(round_data)
+                save_history(self._chat_history)
 
-    # ─── 问候 ──────────────────────────────────────────────
+        # ─── 问候 ──────────────────────────────────────────────
+        finally:
+            self._chat_active = False
+
 
     async def _do_greeting(self, force: bool = False):
         """随机问候：根据时段选一个人说话"""
@@ -591,6 +630,10 @@ class TwinSoulPlugin(Star):
     async def _maybe_interject(self, event: AstrMessageEvent):
         """有人在群里和双子说话时，另一人概率插话"""
         if not self.config.get("interject_chance", 30):
+            return
+
+        # 急停后不插话
+        if self._emergency_stop:
             return
 
         # 睡眠窗口内默认不插话（概率熬夜例外）
@@ -814,6 +857,7 @@ class TwinSoulPlugin(Star):
 
     async def _api_start(self):
         if self._running: return json_response({"message": "已在运行"})
+        self._emergency_stop = False
         if not self.config.get("group_id"): return error_response("未设置群号")
         await self._refresh_bot_map()
         zq, wq = self.config.get("zaiens_qq", ""), self.config.get("william_qq", "")
@@ -826,10 +870,10 @@ class TwinSoulPlugin(Star):
         return json_response({"message": "已开启"})
 
     async def _api_stop(self):
-        if not self._running: return json_response({"message": "已停止"})
+        self._emergency_stop = True
         self._running = False
         if self._task: self._task.cancel(); self._task = None
-        return json_response({"message": "已停止"})
+        return json_response({"message": "已急停：当前对话终止，定时循环已停"})
 
     # ═══════════════════════════════════════════════════════
     # QQ指令
@@ -855,6 +899,7 @@ class TwinSoulPlugin(Star):
             if missing:
                 yield event.plain_result(f"找不到bot: {', '.join(missing)}")
                 return
+            self._emergency_stop = False
             self._running = True
             self._task = asyncio.create_task(self._timed_loop())
             yield event.plain_result("双子对话已开启（含定时问候+插话）")
@@ -864,9 +909,16 @@ class TwinSoulPlugin(Star):
             if self._task: self._task.cancel(); self._task = None
             yield event.plain_result("已关闭")
 
+        elif cmd in ("停止", "stop", "急停"):
+            self._emergency_stop = True
+            self._running = False
+            if self._task: self._task.cancel(); self._task = None
+            yield event.plain_result("⛔ 已急停：当前对话立即终止，定时循环已停（ts 开启 恢复）")
+
         elif cmd == "对话":
             if not self.config.get("group_id"):
                 yield event.plain_result("请先设置 group_id"); return
+            self._emergency_stop = False
             seed = " ".join([key, value]).strip() if key else ""
             yield event.plain_result("双子对话中..." if not seed else f"话题：{seed}")
             await self._do_chat_round(custom_seed=seed, force=True)
@@ -874,6 +926,7 @@ class TwinSoulPlugin(Star):
         elif cmd == "问候":
             if not self.config.get("group_id"):
                 yield event.plain_result("请先设置 group_id"); return
+            self._emergency_stop = False
             yield event.plain_result("问候中...")
             await self._do_greeting(force=True)
 
