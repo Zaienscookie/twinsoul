@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 chat_history.json
 context_memory.json
+data/
