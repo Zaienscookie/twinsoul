@@ -1,5 +1,9 @@
 chat_interval_minutes: 90
 context_rounds: 5
+delay_long_chance: 20
+delay_long_max_sec: 180
+delay_long_min_sec: 60
+delay_short_sec: 20
 enable_timed_chat: true
 evening_boost: 20
 greeting_chance: 35
@@ -11,8 +15,6 @@ max_chat_rounds: 8
 morning_boost: 25
 night_boost: 15
 noon_boost: 20
-reply_delay_max: 2
-reply_delay_min: 0.5
 sleep_end_hour: 7
 sleep_start_hour: 23
 sleep_talk_chance: 15

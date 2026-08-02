@@ -275,6 +275,10 @@ class TwinSoulPlugin(Star):
                 lines.append(f"{rn}: {entry['text']}")
             lines.append("")
 
+        lines.append("=== 说话要求 ===")
+        lines.append("自然口语化，直接说内容。别用「嗯」「啊」「哦」「那」等口头禅开头或填充；别重复对方刚说过的话或观点；话题自然结束就简单收尾，别硬续。")
+        lines.append("")
+
         lines.append("=== 当前 ===")
         if replied_to:
             lines.append(f"刚才{replied_to}说了话，你回应一句。")
@@ -296,8 +300,10 @@ class TwinSoulPlugin(Star):
                          is_greeting: bool = False,
                          is_interject: bool = False,
                          is_long: bool = False,
-                         replied_to: str = "") -> Optional[str]:
-        await self._simulate_reply_delay()
+                         replied_to: str = "",
+                         use_delay: bool = True) -> Optional[str]:
+        if use_delay:
+            await self._simulate_reply_delay()
         try:
             provider = self.context.get_using_provider(
                 umo=f"zaiens:GroupMessage:{group_id}"
@@ -325,16 +331,22 @@ class TwinSoulPlugin(Star):
             return None
 
     async def _simulate_reply_delay(self):
-        """模拟真人回复前的延迟：明明收到消息，但隔一会儿才回。
-        时间为 reply_delay_min ~ reply_delay_max 分钟之间的随机值。"""
+        """模拟真人回复延迟：多数情况短（人正看着屏幕），偶尔长（思考/懒得回）。
+        短延迟 2~delay_short_sec 秒；小概率走长延迟 delay_long_min_sec~delay_long_max_sec 秒。"""
         cfg = self.config
         try:
-            mn = float(cfg.get("reply_delay_min", 0.5))
-            mx = float(cfg.get("reply_delay_max", 2.0))
-        except:
-            mn, mx = 0.5, 2.0
-        if mx < mn: mx = mn
-        secs = random.uniform(mn, mx) * 60
+            short_max = float(cfg.get("delay_short_sec", 20))
+            long_min = float(cfg.get("delay_long_min_sec", 60))
+            long_max = float(cfg.get("delay_long_max_sec", 180))
+            long_chance = float(cfg.get("delay_long_chance", 20))
+        except Exception:
+            short_max, long_min, long_max, long_chance = 20, 60, 180, 20
+        if long_min > long_max:
+            long_min = long_max
+        if random.random() * 100 < long_chance:
+            secs = random.uniform(long_min, long_max)
+        else:
+            secs = random.uniform(2, short_max)
         if secs > 0:
             await asyncio.sleep(secs)
 
@@ -359,7 +371,7 @@ class TwinSoulPlugin(Star):
             )
             if not provider: return False
             judge_prompt = f"""判断下面这句话是否是一个话题的自然结束。
-如果是日常闲聊的自然收尾（晚安、先忙了、好的、嗯、哈哈这类），回答 NO。
+如果是日常闲聊的自然收尾（晚安、先忙了、好的、嗯、哈哈、知道了、行这类简单应承，或只是在重复客套），回答 NO。
 如果话里还有继续聊下去的空间（疑问、反问、分享、吐槽、提到新话题），回答 YES。
 只回答 YES 或 NO，不要多余内容。
 
@@ -414,7 +426,7 @@ class TwinSoulPlugin(Star):
             second_speaker_qq, second_speaker_persona = wq, wp
             second_speaker_role = "william"
 
-        first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed)
+        first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed, use_delay=not force)
         if not first: return
         round_data.append({"time": ts, "role": first_speaker_role, "text": first, "qq": first_speaker_qq})
         self._update_context(first_speaker_persona, first, first_speaker_role)
@@ -430,7 +442,8 @@ class TwinSoulPlugin(Star):
 
             reply = await self._speak_as(
                 group_id, qq, pn, seed,
-                is_long=True, replied_to=last_reply
+                is_long=True, replied_to=last_reply,
+                use_delay=not force
             )
             if not reply:
                 stop_reason = "no_reply"; break
@@ -480,14 +493,14 @@ class TwinSoulPlugin(Star):
         # 随机选谁问候
         if random.randint(1, 100) <= 50:
             seed = get_hour_seed()
-            text = await self._speak_as(group_id, zq, zp, seed, is_greeting=True)
+            text = await self._speak_as(group_id, zq, zp, seed, is_greeting=True, use_delay=not force)
             if text:
                 self._update_context(zp, text, "zaiens")
                 self._chat_history.append({"time": datetime.now().timestamp(), "role": "zaiens", "text": text, "qq": zq, "type": "greeting"})
                 save_history(self._chat_history)
         else:
             seed = get_hour_seed()
-            text = await self._speak_as(group_id, wq, wp, seed, is_greeting=True)
+            text = await self._speak_as(group_id, wq, wp, seed, is_greeting=True, use_delay=not force)
             if text:
                 self._update_context(wp, text, "william")
                 self._chat_history.append({"time": datetime.now().timestamp(), "role": "william", "text": text, "qq": wq, "type": "greeting"})
@@ -628,8 +641,10 @@ class TwinSoulPlugin(Star):
             "noon_boost": cfg.get("noon_boost", 20),
             "evening_boost": cfg.get("evening_boost", 20),
             "night_boost": cfg.get("night_boost", 15),
-            "reply_delay_min": cfg.get("reply_delay_min", 0.5),
-            "reply_delay_max": cfg.get("reply_delay_max", 2.0),
+            "delay_short_sec": cfg.get("delay_short_sec", 20),
+            "delay_long_min_sec": cfg.get("delay_long_min_sec", 60),
+            "delay_long_max_sec": cfg.get("delay_long_max_sec", 180),
+            "delay_long_chance": cfg.get("delay_long_chance", 20),
             "sleep_start_hour": cfg.get("sleep_start_hour", 23),
             "sleep_end_hour": cfg.get("sleep_end_hour", 7),
             "sleep_talk_chance": cfg.get("sleep_talk_chance", 15),
@@ -773,7 +788,7 @@ class TwinSoulPlugin(Star):
                 f"概率{self.config.get('greeting_chance', 35)}% "
                 f"时段加成+{get_time_bonus(self.config)}\n"
                 f"插话概率: {self.config.get('interject_chance', 30)}%\n"
-                f"回复延迟: {self.config.get('reply_delay_min', 0.5)}-{self.config.get('reply_delay_max', 2.0)}分\n"
+                f"回复延迟: 短{self.config.get('delay_short_sec', 20)}s内/长{self.config.get('delay_long_min_sec', 60)}-{self.config.get('delay_long_max_sec', 180)}s 概率{self.config.get('delay_long_chance', 20)}%\n"
                 f"睡眠: {self.config.get('sleep_start_hour', 23)}:{'00'}~{self.config.get('sleep_end_hour', 7)}:00 "
                 f"熬夜概率{self.config.get('sleep_talk_chance', 15)}% "
                 f"{'(休息中)' if wants_to_sleep(self.config) else '(清醒)'}\n"
@@ -796,7 +811,7 @@ class TwinSoulPlugin(Star):
                 "context_rounds", "interject_chance",
                 "greeting_enabled", "greeting_chance", "greeting_check_interval",
                 "morning_boost", "noon_boost", "evening_boost", "night_boost",
-                "reply_delay_min", "reply_delay_max",
+                "delay_short_sec", "delay_long_min_sec", "delay_long_max_sec", "delay_long_chance",
                 "sleep_start_hour", "sleep_end_hour", "sleep_talk_chance",
             ]
             if not key:
@@ -806,7 +821,7 @@ class TwinSoulPlugin(Star):
                 yield event.plain_result(f"无效项: {key}"); return
             if key in ("enable_timed_chat", "greeting_enabled"):
                 value = value.lower() in ("true", "1", "yes", "开启", "是")
-            elif key in ("reply_delay_min", "reply_delay_max"):
+            elif key in ("delay_short_sec", "delay_long_min_sec", "delay_long_max_sec", "delay_long_chance"):
                 try: value = float(value)
                 except: yield event.plain_result("请输入数字"); return
             elif key in ("chat_interval_minutes", "william_initiate_chance",
