@@ -319,7 +319,7 @@ class TwinSoulPlugin(Star):
                          "续聊" if is_long else "话题" if seed_text else "日常")
                 pname = getattr(provider, "provider_name", None) or type(provider).__name__
                 logger.info(f"[twinsoul] ▶ {persona_name} 发言 | 情景={scene} | 回复对象={replied_to or '-'} | 延迟={'开' if use_delay else '关'} | provider={pname}")
-                logger.info(f"[twinsoul]   prompt({len(prompt)}字):\n{prompt}")
+                logger.info(f"[twinsoul]   prompt共{len(prompt)}字, 前220字: {prompt[:220].replace(chr(10), ' ⏎ ')}...")
 
             t0 = time.time()
             ret = await provider.text_chat(
@@ -333,7 +333,7 @@ class TwinSoulPlugin(Star):
                 if dbg:
                     rc = getattr(ret, "reasoning_content", None)
                     if rc:
-                        logger.info(f"[twinsoul]   🧠思维链({persona_name}): {str(rc)[:500]}")
+                        logger.info(f"[twinsoul]   🧠思维链({persona_name}): {str(rc)[:300]}")
                     usage = getattr(ret, "usage", None)
                     if usage:
                         tin = (getattr(usage, "input_other", 0) or 0) + (getattr(usage, "input_cached", 0) or 0)
@@ -468,12 +468,12 @@ class TwinSoulPlugin(Star):
         # 长对话循环
         for r in range(max_rounds):
             await asyncio.sleep(random.uniform(2, 6))
-            if self.config.get("debug_log", True):
-                logger.info(f"[twinsoul] --- 轮次{r} | 说话={role} ---")
             is_second = (r % 2 == 0)
             qq = second_speaker_qq if is_second else first_speaker_qq
             pn = second_speaker_persona if is_second else first_speaker_persona
             role = second_speaker_role if is_second else first_speaker_role
+            if self.config.get("debug_log", True):
+                logger.info(f"[twinsoul] --- 轮次{r} | 说话={role} ---")
 
             reply = await self._speak_as(
                 group_id, qq, pn, seed,
