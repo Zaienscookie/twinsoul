@@ -38,6 +38,8 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 HISTORY_PATH = os.path.join(BASE_DIR, "chat_history.json")
 CONTEXT_PATH = os.path.join(BASE_DIR, "context_memory.json")
 SCHEDULE_PATH = os.path.join(BASE_DIR, "schedule.json")
+SCHEDULE_HISTORY_PATH = os.path.join(BASE_DIR, "schedule_history.json")
+SCHEDULE_HISTORY_KEEP = 14   # 历史日程保留天数（参考框定）
 
 # ─── 工具函数 ──────────────────────────────────────────────
 
@@ -143,9 +145,13 @@ def _hm(t: str) -> int:
 def _mh(mins: int) -> str:
     return f"{mins // 60:02d}:{mins % 60:02d}"
 
-def _gen_schedule(date_str: str) -> list:
-    """按日期种子生成当天节点，固定时间钉死、浮动节点窗内随机且递增"""
+def _gen_schedule(date_str: str, ref: dict = None) -> list:
+    """按日期种子生成当天节点。
+    固定时间钉死；浮动节点若前一天有参考时间则在参考点附近小漂移（±18分钟），
+    无参考则在窗内随机——保证连续两天日程不会出现大隔阂。
+    """
     rng = random.Random(f"twinsoul-schedule-{date_str}")
+    ref = ref or {}
     nodes = []
     prev = 0
     for ws, we, title, fixed, detail in SCHEDULE_TEMPLATE:
@@ -155,13 +161,62 @@ def _gen_schedule(date_str: str) -> list:
         else:
             lo = max(ws_m, prev + 2)
             hi = we_m - 2
-            t = lo if hi <= lo else rng.randint(lo, hi)
+            base = ref.get(title)
+            if base is not None:
+                t = base + rng.randint(-18, 18)   # 小漂移，保持生活节奏
+                t = max(lo, min(hi, t))
+            else:
+                t = lo if hi <= lo else rng.randint(lo, hi)
         nodes.append({
             "time": _mh(t), "title": title, "detail": detail,
             "fixed": fixed, "status": "pending", "manual": False,
         })
         prev = t
     return nodes
+
+def _load_schedule_history() -> dict:
+    """历史日程（最近 N 天），作为新一天生成的参考框定"""
+    try:
+        with open(SCHEDULE_HISTORY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"dates": []}
+
+def _save_schedule_history(hist: dict):
+    try:
+        with open(SCHEDULE_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(hist, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"twinsoul: 日程历史保存失败 {e}")
+
+def _get_ref_times(hist: dict) -> dict:
+    """取最近一天的浮动节点时间作为参考：{title: 分钟}"""
+    dates = hist.get("dates", [])
+    if not dates:
+        return {}
+    last = dates[-1]
+    return {n["title"]: _hm(n["time"]) for n in last.get("nodes", [])
+            if n.get("time") and not n.get("fixed")}
+
+def _roll_new_day() -> dict:
+    """跨天滚动：先把旧的一天存入历史，再基于历史漂移生成新的一天"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    hist = _load_schedule_history()
+    try:
+        with open(SCHEDULE_PATH, "r", encoding="utf-8") as f:
+            cur = json.load(f)
+        if cur.get("date") and cur["date"] != today:
+            hist.setdefault("dates", []).append(
+                {"date": cur["date"], "nodes": cur.get("nodes", [])})
+            hist["dates"] = hist["dates"][-SCHEDULE_HISTORY_KEEP:]
+            _save_schedule_history(hist)
+    except Exception:
+        pass
+    ref = _get_ref_times(hist)
+    nodes = _gen_schedule(today, ref)
+    data = {"date": today, "nodes": nodes}
+    _save_schedule(data)
+    return data
 
 def _save_schedule(data: dict):
     try:
@@ -180,9 +235,7 @@ def _load_schedule() -> dict:
             return data
     except Exception:
         pass
-    data = {"date": today, "nodes": _gen_schedule(today)}
-    _save_schedule(data)
-    return data
+    return _roll_new_day()
 
 def _refresh_schedule_status(data: dict) -> dict:
     """按当前时间刷新节点状态（手动标记的节点不覆盖）"""
@@ -356,6 +409,20 @@ class TwinSoulPlugin(Star):
                 f"/{PLUGIN_NAME}/{route}", handler, methods, f"{PLUGIN_NAME} {route}"
             )
 
+    async def _schedule_daily_loop(self):
+        """每日日程自动生成：每 30 分钟检查一次，跨天自动滚动生成（不依赖 ts 开启）"""
+        while True:
+            try:
+                if self.config.get("schedule_auto", True):
+                    data = _load_schedule()
+                    if self.config.get("debug_log", True):
+                        logger.info(f"[twinsoul] 📅 日程就绪：{data['date']} {len(data.get('nodes', []))}节点")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"twinsoul: 日程生成异常 {e}")
+            await asyncio.sleep(1800)
+
     async def _auto_start(self):
         """插件加载后自动开启：等 3 秒让 provider/bot 就绪，再启动定时循环"""
         try:
@@ -370,7 +437,9 @@ class TwinSoulPlugin(Star):
                 return
             self._running = True
             self._task = asyncio.create_task(self._timed_loop())
-            logger.info("twinsoul 已自动开启（定时对话+插话）")
+            if not getattr(self, "_schedule_task", None) or self._schedule_task.done():
+                self._schedule_task = asyncio.create_task(self._schedule_daily_loop())
+            logger.info("twinsoul 已自动开启（定时对话+插话+每日日程）")
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -1158,5 +1227,7 @@ class TwinSoulPlugin(Star):
     async def terminate(self):
         self._running = False
         if self._task: self._task.cancel(); self._task = None
+        if getattr(self, "_schedule_task", None):
+            self._schedule_task.cancel(); self._schedule_task = None
         save_context(self.context_memory)
         save_history(self._chat_history)

@@ -4,3 +4,4 @@ chat_history.json
 context_memory.json
 data/
 schedule.json
+schedule_history.json
