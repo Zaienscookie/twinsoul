@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twinsoul v3 管理面板</title>
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🐯 Twinsoul v3</h1>
+            <p class="subtitle">扎恩斯 &amp; 威廉 · 长对话 · 定时问候 · 插话</p>
+        </header>
+
+        <div class="status-bar" id="status-bar">
+            <span class="status-item" id="sb-running">⏳ 检测中</span>
+            <span class="status-item" id="sb-bots">🤖 Bot: -</span>
+            <span class="status-item" id="sb-history">📝 历史: -</span>
+            <span class="status-item" id="sb-context">🧠 记忆: -</span>
+            <span class="status-item" id="sb-interject">💬 插话: -</span>
+            <span class="status-item" id="sb-greeting">🌅 问候: -</span>
+            <span class="status-item" id="sb-sleep">🌙 睡眠: -</span>
+        </div>
+
+        <div class="grid">
+            <!-- 控制 -->
+            <section class="card">
+                <h2>🎮 控制</h2>
+                <div class="btn-group">
+                    <button id="btn-start" class="btn btn-success">▶ 开启</button>
+                    <button id="btn-stop" class="btn btn-danger">⏹ 关闭</button>
+                    <button id="btn-chat" class="btn btn-primary">💬 对话一轮</button>
+                    <button id="btn-greet" class="btn btn-info">🌅 问候一次</button>
+                </div>
+                <div class="form-row" style="margin-top:10px">
+                    <input type="text" id="chat-seed" placeholder="指定话题对话" style="flex:1;padding:6px 10px;border:1px solid #2a2a4a;border-radius:6px;background:#0f0f1a;color:#e0e0e0">
+                    <button id="btn-chat-seed" class="btn btn-sm btn-primary">发送</button>
+                </div>
+                <div id="control-msg" class="msg"></div>
+            </section>
+
+            <!-- 配置 基础 -->
+            <section class="card">
+                <h2>⚙️ 基础配置</h2>
+                <div class="config-form">
+                    <div class="form-row"><label>群号</label><input type="text" id="cfg-group_id"></div>
+                    <div class="form-row"><label>扎恩斯QQ</label><input type="text" id="cfg-zaiens_qq"></div>
+                    <div class="form-row"><label>威廉QQ</label><input type="text" id="cfg-william_qq"></div>
+                    <div class="form-row"><label>扎恩斯人格</label><input type="text" id="cfg-zaiens_persona"></div>
+                    <div class="form-row"><label>威廉人格</label><input type="text" id="cfg-william_persona"></div>
+                    <div class="form-row"><label>对话间隔(分)</label><input type="number" id="cfg-interval" min="10"></div>
+                    <div class="form-row"><label>上下文轮数</label><input type="number" id="cfg-context_rounds" min="1" max="20"></div>
+                    <div class="form-row"><label>威廉发起%</label><input type="number" id="cfg-william_chance" min="0" max="100"></div>
+                    <div class="form-row"><label>扎恩斯发起%</label><input type="number" id="cfg-zaiens_chance" min="0" max="100"></div>
+                    <div class="form-row"><label>定时对话</label>
+                        <select id="cfg-timed"><option value="true">开启</option><option value="false">关闭</option></select>
+                    </div>
+                </div>
+                <div id="config-msg" class="msg"></div>
+            </section>
+        </div>
+
+        <!-- 第二行：问候 + 插话 + 时段 -->
+        <div class="grid">
+            <section class="card">
+                <h2>🌅 问候设置</h2>
+                <div class="config-form">
+                    <div class="form-row"><label>启用问候</label>
+                        <select id="cfg-greeting_enabled"><option value="true">开启</option><option value="false">关闭</option></select>
+                    </div>
+                    <div class="form-row"><label>问候概率%</label><input type="number" id="cfg-greeting_chance" min="0" max="100"></div>
+                    <div class="form-row"><label>检查间隔(分)</label><input type="number" id="cfg-greeting_check_interval" min="10"></div>
+                </div>
+            </section>
+            <section class="card">
+                <h2>💬 插话 & 时段加成</h2>
+                <div class="config-form">
+                    <div class="form-row"><label>插话概率%</label><input type="number" id="cfg-interject_chance" min="0" max="100"></div>
+                    <div class="form-row"><label>🌅 早晨加成</label><input type="number" id="cfg-morning_boost" min="0" max="100"></div>
+                    <div class="form-row"><label>☀️ 中午加成</label><input type="number" id="cfg-noon_boost" min="0" max="100"></div>
+                    <div class="form-row"><label>🌆 傍晚加成</label><input type="number" id="cfg-evening_boost" min="0" max="100"></div>
+                    <div class="form-row"><label>🌙 深夜加成</label><input type="number" id="cfg-night_boost" min="0" max="100"></div>
+                </div>
+                <button id="btn-save-config" class="btn btn-primary" style="width:100%;margin-top:10px">💾 保存全部配置</button>
+            </section>
+        </div>
+
+        <!-- 第三行：回复延迟 + 睡眠 -->
+        <div class="grid">
+            <section class="card">
+                <h2>⏳ 回复延迟</h2>
+                <p class="hint">模拟真人"没立刻看到消息"，延迟一段再回。</p>
+                <div class="config-form">
+                    <div class="form-row"><label>最短延迟(分)</label><input type="number" id="cfg-reply_delay_min" min="0" step="0.1"></div>
+                    <div class="form-row"><label>最长延迟(分)</label><input type="number" id="cfg-reply_delay_max" min="0" step="0.1"></div>
+                </div>
+            </section>
+            <section class="card">
+                <h2>🌙 睡眠阈值</h2>
+                <p class="hint">设定时间段内双子默认休息，仅概率性熬夜说话。</p>
+                <div class="config-form">
+                    <div class="form-row"><label>入睡时(时)</label><input type="number" id="cfg-sleep_start_hour" min="0" max="23"></div>
+                    <div class="form-row"><label>起床时(时)</label><input type="number" id="cfg-sleep_end_hour" min="0" max="23"></div>
+                    <div class="form-row"><label>熬夜概率%</label><input type="number" id="cfg-sleep_talk_chance" min="0" max="100"></div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Tab -->
+        <div class="tabs">
+            <button class="tab active" data-tab="history">📝 对话历史</button>
+            <button class="tab" data-tab="context">🧠 上下文记忆</button>
+            <button class="tab" data-tab="memory-detail">📋 记忆详情</button>
+        </div>
+
+        <!-- 历史 -->
+        <section class="card full-width tab-content active" id="tab-history">
+            <h2>对话历史 <span id="history-count" class="badge">0</span></h2>
+            <div class="toolbar">
+                <button class="btn btn-sm filter-btn active" data-filter="all">全部</button>
+                <button class="btn btn-sm filter-btn" data-filter="zaiens">扎恩斯</button>
+                <button class="btn btn-sm filter-btn" data-filter="william">威廉</button>
+                <button class="btn btn-sm" id="btn-refresh-history">🔄 刷新</button>
+                <button class="btn btn-sm btn-warning" id="btn-clear-history">🗑 清空</button>
+            </div>
+            <div id="history-list" class="history-list"><div class="empty">暂无记录</div></div>
+        </section>
+
+        <!-- 上下文 -->
+        <section class="card full-width tab-content" id="tab-context">
+            <h2>🧠 上下文记忆</h2>
+            <div class="toolbar">
+                <span style="color:#888;font-size:0.85em">保留最近 <strong id="ctx-rounds-display">5</strong> 轮</span>
+                <button class="btn btn-sm btn-warning" id="btn-clear-context">🗑 清空</button>
+                <button class="btn btn-sm" id="btn-refresh-context">🔄 刷新</button>
+            </div>
+            <div class="context-grid">
+                <div class="context-col">
+                    <h3 style="color:#60a5fa">扎恩斯 · <span id="ctx-z-count">0</span>条</h3>
+                    <div id="ctx-zaiens" class="context-list"><div class="empty">无</div></div>
+                </div>
+                <div class="context-col">
+                    <h3 style="color:#fbbf24">威廉 · <span id="ctx-w-count">0</span>条</h3>
+                    <div id="ctx-william" class="context-list"><div class="empty">无</div></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 记忆详情 -->
+        <section class="card full-width tab-content" id="tab-memory-detail">
+            <h2>📋 原始数据</h2>
+            <div class="toolbar"><button class="btn btn-sm" id="btn-refresh-memory">🔄 刷新</button></div>
+            <pre id="memory-raw" class="raw-json">加载中...</pre>
+        </section>
+    </div>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script type="module" src="./app.js"></script>
+</body>
+</html>

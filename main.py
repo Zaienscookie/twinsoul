@@ -1,0 +1,848 @@
+"""
+twinsoul v3 - 双子Soul插件（完整版）
+让尤里家双子（扎恩斯 & 威廉）在群聊中进行有记忆的长对话
+
+核心特性:
+  1. 长对话上下文记忆（保留最近N轮）
+  2. 定时随机问候（早起、吃饭、晚安，像真人一样）
+  3. 插话机制（有人在群里和双子说话时，另一人概率性插话）
+  4. 时段感知（不同时段问候概率不同）
+  5. 双账号分离（各用各的QQ发消息）
+  6. 全部参数可调
+  7. WebUI 管理面板
+
+指令:
+  /ts              - 帮助
+  /ts 开启         - 启动定时对话+问候
+  /ts 关闭         - 停止
+  /ts 对话 [话题]  - 手动触发一轮
+  /ts 重置         - 清空记忆
+  /ts 状态         - 查看状态
+  /ts 设置 k v     - 改配置
+"""
+
+import os, time, random, asyncio, json, yaml
+from typing import Optional
+from datetime import datetime, time as dtime
+
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import filter as filter_mod
+from astrbot.api.star import Context, Star, register
+from astrbot.api.web import json_response, error_response, request
+from astrbot.api import logger
+from astrbot.core.star.star_handler import EventType, StarHandlerMetadata, star_handlers_registry
+
+PLUGIN_NAME = "twinsoul"
+BASE_DIR = os.path.dirname(__file__)
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+HISTORY_PATH = os.path.join(BASE_DIR, "chat_history.json")
+CONTEXT_PATH = os.path.join(BASE_DIR, "context_memory.json")
+
+# ─── 工具函数 ──────────────────────────────────────────────
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+def save_config(cfg: dict):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+def load_history() -> list:
+    if not os.path.exists(HISTORY_PATH): return []
+    try:
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except: return []
+
+def save_history(history: list):
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(history[-500:], f, ensure_ascii=False, indent=2)
+
+def load_context() -> dict:
+    if not os.path.exists(CONTEXT_PATH): return {"zaiens": [], "william": []}
+    try:
+        with open(CONTEXT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict): return data
+            return {"zaiens": [], "william": []}
+    except: return {"zaiens": [], "william": []}
+
+def save_context(ctx: dict):
+    with open(CONTEXT_PATH, "w", encoding="utf-8") as f:
+        json.dump(ctx, f, ensure_ascii=False, indent=2)
+
+# 各时段的问候种子
+MORNING_SEEDS = [
+    "早上了", "起床了", "今天天气不错", "早上吃什么",
+    "新的一天", "睡醒了没", "早啊",
+]
+NOON_SEEDS = [
+    "中午了", "午饭吃什么", "饿了", "今天中午吃啥",
+    "饭点了", "忙了一上午",
+]
+EVENING_SEEDS = [
+    "晚上了", "晚饭吃什么", "今天累不累", "收工了",
+    "天黑了", "该吃饭了",
+]
+NIGHT_SEEDS = [
+    "不早了", "睡了", "晚安", "早点休息",
+    "今天差不多了", "关店了",
+]
+
+# 通用种子（不分时段）
+SEEDS = [
+    "刚忙完", "今天客人多", "酒馆刚收拾完",
+    "外面下雨了", "看到你了", "没什么事",
+    "李先生今天来过了", "有点无聊", "想着你",
+]
+
+def get_hour_seed() -> str:
+    """根据当前时段返回合适的问候种子"""
+    h = datetime.now().hour
+    if 6 <= h < 9:
+        return random.choice(MORNING_SEEDS)
+    elif 11 <= h < 13:
+        return random.choice(NOON_SEEDS)
+    elif 17 <= h < 19:
+        return random.choice(EVENING_SEEDS)
+    elif h >= 22 or h < 6:
+        return random.choice(NIGHT_SEEDS)
+    else:
+        return random.choice(SEEDS)
+
+def get_time_bonus(cfg: dict) -> int:
+    """获取当前时段的额外概率加成"""
+    h = datetime.now().hour
+    if 6 <= h < 9: return cfg.get("morning_boost", 25)
+    elif 11 <= h < 13: return cfg.get("noon_boost", 20)
+    elif 17 <= h < 19: return cfg.get("evening_boost", 20)
+    elif h >= 22 or h < 6: return cfg.get("night_boost", 15)
+    return 0
+
+def is_in_sleep_window(cfg: dict) -> bool:
+    """判断当前是否处于睡眠时间窗（支持跨天，如 23:00-7:00）"""
+    try:
+        start = int(cfg.get("sleep_start_hour", 23))
+        end = int(cfg.get("sleep_end_hour", 7))
+    except:
+        start, end = 23, 7
+    if start == end:
+        return False
+    h = datetime.now().hour
+    if start < end:
+        return start <= h < end
+    return h >= start or h < end
+
+def wants_to_sleep(cfg: dict) -> bool:
+    """睡眠时间窗内，概率熬夜后仍是否应当休息。
+    返回 True 表示应该休息（不活动），False 表示今晚没睡/还在熬夜。"""
+    if not is_in_sleep_window(cfg):
+        return False
+    chance = cfg.get("sleep_talk_chance", 15)
+    try: chance = int(chance)
+    except: chance = 15
+    return random.randint(1, 100) > chance
+
+# ─── 主插件类 ──────────────────────────────────────────────
+
+@register(PLUGIN_NAME, "扎恩斯", "双子Soul v3.1 - 长对话+问候+插话+延迟+睡眠+WebUI", "3.1.0")
+class TwinSoulPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+        self.config = load_config()
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+        self._bot_map: dict = {}
+        self.context_memory = load_context()
+        self._chat_history = load_history()
+
+        # 手动注册消息监听（替代不存在的 @filter.on_message）
+        self._register_message_handler()
+
+        # 注册 Web API
+        self._register_apis()
+
+        # 配置了群号则自动开启（重启后无需手动 /ts 开启）
+        if self.config.get("group_id"):
+            try:
+                self._task = asyncio.create_task(self._auto_start())
+            except Exception as e:
+                logger.error(f"twinsoul 自动启动失败: {e}")
+
+        logger.info(f"{PLUGIN_NAME} v3 加载完成")
+
+    def _register_message_handler(self):
+        """手动注册一个无过滤条件的消息处理器，用于插话"""
+        md = StarHandlerMetadata(
+            event_type=EventType.AdapterMessageEvent,
+            handler_full_name=f"{__name__}_twinsoul_on_group_message",
+            handler_name="on_group_message",
+            handler_module_path=__name__,
+            handler=self.on_group_message,
+            event_filters=[],
+            desc="twinsoul 插话：监听群消息"
+        )
+        star_handlers_registry.append(md)
+
+    def _register_apis(self):
+        apis = [
+            ("status",       self._api_status,       ["GET"]),
+            ("config",       self._api_get_config,    ["GET"]),
+            ("config/save",  self._api_save_config,   ["POST"]),
+            ("chat",         self._api_do_chat,       ["POST"]),
+            ("history",      self._api_history,       ["GET"]),
+            ("history/clear",self._api_clear_history, ["POST"]),
+            ("context",      self._api_context,       ["GET"]),
+            ("context/clear",self._api_clear_context, ["POST"]),
+            ("start",        self._api_start,         ["POST"]),
+            ("stop",         self._api_stop,          ["POST"]),
+            ("greet",        self._api_greet,         ["POST"]),
+        ]
+        for route, handler, methods in apis:
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/{route}", handler, methods, f"{PLUGIN_NAME} {route}"
+            )
+
+    async def _auto_start(self):
+        """插件加载后自动开启：等 3 秒让 provider/bot 就绪，再启动定时循环"""
+        try:
+            await asyncio.sleep(3)
+            if self._running:
+                return
+            await self._refresh_bot_map()
+            zq = self.config.get("zaiens_qq", "")
+            wq = self.config.get("william_qq", "")
+            if not self._get_bot_by_qq(zq) or not self._get_bot_by_qq(wq):
+                logger.warning("twinsoul 自动启动: 未找到双子 bot，等待下一次重载")
+                return
+            self._running = True
+            self._task = asyncio.create_task(self._timed_loop())
+            logger.info("twinsoul 已自动开启（定时对话+插话）")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"twinsoul 自动启动异常: {e}")
+
+    # ─── Bot映射 ───────────────────────────────────────────
+
+    async def _refresh_bot_map(self):
+        self._bot_map.clear()
+        for inst in self.context.platform_manager.platform_insts:
+            bot = getattr(inst, 'bot', None)
+            if not bot: continue
+            try:
+                info = await bot.call_action("get_login_info")
+                qq = str(info.get("user_id", ""))
+                if qq: self._bot_map[qq] = bot
+            except: pass
+
+    def _get_bot_by_qq(self, qq: str):
+        return self._bot_map.get(qq)
+
+    # ─── 核心：说话 ────────────────────────────────────────
+
+    def _build_prompt(self, persona_name: str, seed: str, 
+                      is_greeting: bool = False, is_interject: bool = False,
+                      is_long: bool = False,
+                      replied_to: str = "") -> str:
+        """构建 prompt：原始设定 + 最近聊天 + 当前情景"""
+        # persona_name 可能是 '111'/'William'（数据库ID），映射到记忆key
+        mem_key = "zaiens" if persona_name in ("zaiens", "111") else "william"
+        memory = self.context_memory.get(mem_key, [])
+        ctx_rounds = self.config.get("context_rounds", 5)
+        recent = memory[-(ctx_rounds * 2):] if len(memory) > ctx_rounds * 2 else memory
+
+        # 从数据库获取原始人格设定原文
+        raw_prompt = ""
+        try:
+            personality = self.context.persona_manager.get_persona_v3_by_id(persona_name)
+            if personality and personality.get("prompt"):
+                raw_prompt = personality["prompt"]
+        except:
+            pass
+
+        lines = ["=== 人物设定 ==="]
+        lines.append(raw_prompt if raw_prompt else f"你是{persona_name}。")
+        lines.append("")
+
+        if recent:
+            lines.append("=== 最近聊天 ===")
+            for entry in recent[-6:]:
+                rn = "扎恩斯" if entry["role"] == "zaiens" else "威廉"
+                lines.append(f"{rn}: {entry['text']}")
+            lines.append("")
+
+        lines.append("=== 当前 ===")
+        if replied_to:
+            lines.append(f"刚才{replied_to}说了话，你回应一句。")
+        elif is_greeting:
+            lines.append("刚打开群聊，随口打个招呼。")
+        elif is_interject:
+            lines.append("群里有人在说话，你随口接一句。")
+        elif is_long:
+            lines.append("顺着话题继续聊。如果是自然结束点，末尾加【END】。")
+        elif seed:
+            lines.append(f"聊聊{seed}。")
+        else:
+            lines.append("说句日常话。")
+
+        return "\n".join(lines)
+
+    async def _speak_as(self, group_id: str, qq: str, persona_name: str,
+                         seed_text: str = "",
+                         is_greeting: bool = False,
+                         is_interject: bool = False,
+                         is_long: bool = False,
+                         replied_to: str = "") -> Optional[str]:
+        await self._simulate_reply_delay()
+        try:
+            provider = self.context.get_using_provider()
+            if not provider: return None
+
+            prompt = self._build_prompt(persona_name, seed_text, is_greeting, is_interject, is_long, replied_to)
+
+            ret = await provider.text_chat(
+                prompt=prompt,
+                session_id=f"twinsoul_{persona_name}_{group_id}",
+                contexts=[], image_urls=[],
+            )
+
+            if ret and ret.completion_text:
+                reply = ret.completion_text.strip().split("\n")[0][:60]
+                if len(reply) < 2: return None
+                bot = self._get_bot_by_qq(qq)
+                if not bot: return None
+                await bot.call_action("send_group_msg", group_id=int(group_id), message=reply)
+                return reply
+            return None
+        except Exception as e:
+            logger.error(f"twinsoul _speak_as 出错: {e}")
+            return None
+
+    async def _simulate_reply_delay(self):
+        """模拟真人回复前的延迟：明明收到消息，但隔一会儿才回。
+        时间为 reply_delay_min ~ reply_delay_max 分钟之间的随机值。"""
+        cfg = self.config
+        try:
+            mn = float(cfg.get("reply_delay_min", 0.5))
+            mx = float(cfg.get("reply_delay_max", 2.0))
+        except:
+            mn, mx = 0.5, 2.0
+        if mx < mn: mx = mn
+        secs = random.uniform(mn, mx) * 60
+        if secs > 0:
+            await asyncio.sleep(secs)
+
+    def _update_context(self, persona_name: str, text: str, role: str):
+        """更新双方记忆"""
+        for name in ["zaiens", "william"]:
+            if name not in self.context_memory:
+                self.context_memory[name] = []
+            self.context_memory[name].append({
+                "role": role, "text": text,
+                "time": datetime.now().isoformat()
+            })
+        save_context(self.context_memory)
+
+    # ─── 一轮对话 ──────────────────────────────────────────
+
+    async def _should_continue_chat(self, last_reply: str) -> bool:
+        """用 LLM 判断对话是否应该继续"""
+        try:
+            provider = self.context.get_using_provider()
+            if not provider: return False
+            judge_prompt = f"""判断下面这句话是否是一个话题的自然结束。
+如果是日常闲聊的自然收尾（晚安、先忙了、好的、嗯、哈哈这类），回答 NO。
+如果话里还有继续聊下去的空间（疑问、反问、分享、吐槽、提到新话题），回答 YES。
+只回答 YES 或 NO，不要多余内容。
+
+对方最后一句话：{last_reply}"""
+            ret = await provider.text_chat(
+                prompt=judge_prompt,
+                session_id="twinsoul_judge",
+                contexts=[], image_urls=[],
+            )
+            if ret and ret.completion_text:
+                result = ret.completion_text.strip().upper()
+                return "YES" in result
+            return False
+        except:
+            return False
+
+    async def _do_chat_round(self, custom_seed: str = "", force: bool = False):
+        group_id = self.config.get("group_id", "").strip()
+        if not group_id: return
+
+        # 睡眠窗口内默认休息；只有手动触发(force)才可能熬夜聊
+        if not force and wants_to_sleep(self.config):
+            logger.info("twinsoul: 睡眠时间内，双子已休息，跳过对话")
+            return
+
+        await self._refresh_bot_map()
+        zq = self.config.get("zaiens_qq", "")
+        wq = self.config.get("william_qq", "")
+        zp = self.config.get("zaiens_persona", "zaiens")
+        wp = self.config.get("william_persona", "william")
+
+        if not self._get_bot_by_qq(zq) or not self._get_bot_by_qq(wq):
+            logger.error("twinsoul: bot映射不完整"); return
+
+        wc = self.config.get("william_initiate_chance", 55)
+        roll = random.randint(1, 100)
+        seed = custom_seed or get_hour_seed()
+        max_rounds = self.config.get("max_chat_rounds", 8)
+        round_data = []
+        ts = datetime.now().timestamp()
+        stop_reason = "normal"
+
+        # 发起者先说话
+        if roll <= wc:
+            first_speaker_qq, first_speaker_persona = wq, wp
+            first_speaker_role = "william"
+            second_speaker_qq, second_speaker_persona = zq, zp
+            second_speaker_role = "zaiens"
+        else:
+            first_speaker_qq, first_speaker_persona = zq, zp
+            first_speaker_role = "zaiens"
+            second_speaker_qq, second_speaker_persona = wq, wp
+            second_speaker_role = "william"
+
+        first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed)
+        if not first: return
+        round_data.append({"time": ts, "role": first_speaker_role, "text": first, "qq": first_speaker_qq})
+        self._update_context(first_speaker_persona, first, first_speaker_role)
+        last_reply = first
+
+        # 长对话循环
+        for r in range(max_rounds):
+            await asyncio.sleep(random.uniform(2, 6))
+            is_second = (r % 2 == 0)
+            qq = second_speaker_qq if is_second else first_speaker_qq
+            pn = second_speaker_persona if is_second else first_speaker_persona
+            role = second_speaker_role if is_second else first_speaker_role
+
+            reply = await self._speak_as(
+                group_id, qq, pn, seed,
+                is_long=True, replied_to=last_reply
+            )
+            if not reply:
+                stop_reason = "no_reply"; break
+
+            round_data.append({"time": datetime.now().timestamp(), "role": role, "text": reply, "qq": qq})
+            self._update_context(pn, reply, role)
+            last_reply = reply
+
+            # LLM 判断是否该结束
+            if r >= 2:  # 至少聊3轮后再判断
+                should_stop = not await self._should_continue_chat(reply)
+                if should_stop:
+                    stop_reason = "llm_judge"; break
+
+            # 安全阀：如果回复包含明显的结束词
+            end_words = ["先忙了", "晚安", "先下了", "88", "拜拜", "好的", "嗯嗯", "哈哈"]
+            if any(w in reply for w in end_words) and r >= 3:
+                stop_reason = "end_word"; break
+
+        logger.info(f"twinsoul: 对话结束，共{r+1}轮，原因={stop_reason}")
+
+        if round_data:
+            self._chat_history.extend(round_data)
+            save_history(self._chat_history)
+
+    # ─── 问候 ──────────────────────────────────────────────
+
+    async def _do_greeting(self, force: bool = False):
+        """随机问候：根据时段选一个人说话"""
+        group_id = self.config.get("group_id", "").strip()
+        if not group_id: return
+
+        # 睡眠窗口内默认不主动问候
+        if not force and wants_to_sleep(self.config):
+            logger.info("twinsoul: 睡眠时间内，双子已休息，跳过问候")
+            return
+
+        await self._refresh_bot_map()
+        zq = self.config.get("zaiens_qq", "")
+        wq = self.config.get("william_qq", "")
+        zp = self.config.get("zaiens_persona", "zaiens")
+        wp = self.config.get("william_persona", "william")
+
+        if not self._get_bot_by_qq(zq) or not self._get_bot_by_qq(wq):
+            return
+
+        # 随机选谁问候
+        if random.randint(1, 100) <= 50:
+            seed = get_hour_seed()
+            text = await self._speak_as(group_id, zq, zp, seed, is_greeting=True)
+            if text:
+                self._update_context(zp, text, "zaiens")
+                self._chat_history.append({"time": datetime.now().timestamp(), "role": "zaiens", "text": text, "qq": zq, "type": "greeting"})
+                save_history(self._chat_history)
+        else:
+            seed = get_hour_seed()
+            text = await self._speak_as(group_id, wq, wp, seed, is_greeting=True)
+            if text:
+                self._update_context(wp, text, "william")
+                self._chat_history.append({"time": datetime.now().timestamp(), "role": "william", "text": text, "qq": wq, "type": "greeting"})
+                save_history(self._chat_history)
+
+    # ─── 插话 ──────────────────────────────────────────────
+
+    async def _maybe_interject(self, event: AstrMessageEvent):
+        """有人在群里和双子说话时，另一人概率插话"""
+        if not self.config.get("interject_chance", 30):
+            return
+
+        # 睡眠窗口内默认不插话（概率熬夜例外）
+        if wants_to_sleep(self.config):
+            return
+
+        group_id = self.config.get("group_id", "").strip()
+        if not group_id: return
+        if str(group_id) != str(event.get_group_id()): return
+
+        text = event.message_str.strip()
+        sender_qq = event.get_sender_id()
+
+        # 只对提到扎恩斯或威廉的内容触发
+        zq = self.config.get("zaiens_qq", "")
+        wq = self.config.get("william_qq", "")
+        mentioned = False
+        replied_to = ""
+
+        # 检查是否@了扎恩斯或威廉
+        for comp in event.get_messages():
+            if hasattr(comp, "type") and comp.type == "at":
+                if comp.qq == zq:
+                    mentioned = True; replied_to = "扎恩斯"
+                elif comp.qq == wq:
+                    mentioned = True; replied_to = "威廉"
+
+        # 检查内容里是否提到了名字
+        if not mentioned:
+            if "扎恩斯" in text or "zaiens" in text.lower():
+                mentioned = True; replied_to = "扎恩斯"
+            elif "威廉" in text or "william" in text.lower():
+                mentioned = True; replied_to = "威廉"
+
+        if not mentioned: return
+
+        # 发消息的人如果是双子自己，不触发
+        if sender_qq in (zq, wq): return
+
+        chance = self.config.get("interject_chance", 30)
+        if random.randint(1, 100) > chance: return
+
+        await self._refresh_bot_map()
+
+        # 被提到的是扎恩斯，威廉插话；反之亦然
+        if replied_to == "扎恩斯":
+            speaker_qq = wq
+            speaker_p = self.config.get("william_persona", "william")
+            speaker_role = "william"
+        else:
+            speaker_qq = zq
+            speaker_p = self.config.get("zaiens_persona", "zaiens")
+            speaker_role = "zaiens"
+
+        if not self._get_bot_by_qq(speaker_qq): return
+
+        seed = f"看到有人在和{replied_to}说：{text[:30]}"
+        reply = await self._speak_as(group_id, speaker_qq, speaker_p, seed,
+                                      is_interject=True, replied_to=replied_to)
+        if reply:
+            self._update_context(speaker_p, reply, speaker_role)
+            self._chat_history.append({
+                "time": datetime.now().timestamp(), "role": speaker_role,
+                "text": reply, "qq": speaker_qq, "type": "interject"
+            })
+            save_history(self._chat_history)
+
+    # ─── 主循环（定时对话+问候） ───────────────────────────
+
+    async def _timed_loop(self):
+        """主循环：同时处理定时对话和问候"""
+        last_greet_time = time.time()
+
+        while self._running:
+            try:
+                now = datetime.now()
+
+                # 定时对话
+                if self.config.get("enable_timed_chat", True):
+                    await self._do_chat_round()
+
+                # 问候：按实际时间间隔检查，不再依赖计数器
+                if self.config.get("greeting_enabled", True):
+                    greet_interval = self.config.get("greeting_check_interval", 30) * 60  # 转秒
+                    if time.time() - last_greet_time >= greet_interval:
+                        base_chance = self.config.get("greeting_chance", 35)
+                        bonus = get_time_bonus(self.config)
+                        total_chance = min(base_chance + bonus, 80)
+                        if random.randint(1, 100) <= total_chance:
+                            await self._do_greeting()
+                        last_greet_time = time.time()
+
+                interval = self.config.get("chat_interval_minutes", 90)
+                await asyncio.sleep(interval * 60)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"twinsoul 主循环异常: {e}")
+                await asyncio.sleep(60)
+
+    # ═══════════════════════════════════════════════════════
+    # Web API
+    # ═══════════════════════════════════════════════════════
+
+    async def _api_status(self):
+        await self._refresh_bot_map()
+        ctx_z = len(self.context_memory.get("zaiens", []))
+        ctx_w = len(self.context_memory.get("william", []))
+        cfg = self.config
+        return json_response({
+            "running": self._running,
+            "group_id": cfg.get("group_id", ""),
+            "zaiens_qq": cfg.get("zaiens_qq", ""),
+            "william_qq": cfg.get("william_qq", ""),
+            "zaiens_persona": cfg.get("zaiens_persona", "zaiens"),
+            "william_persona": cfg.get("william_persona", "william"),
+            "timed_chat": cfg.get("enable_timed_chat", True),
+            "interval": cfg.get("chat_interval_minutes", 90),
+            "william_chance": cfg.get("william_initiate_chance", 55),
+            "zaiens_chance": cfg.get("zaiens_initiate_chance", 45),
+            "context_rounds": cfg.get("context_rounds", 5),
+            "interject_chance": cfg.get("interject_chance", 30),
+            "greeting_enabled": cfg.get("greeting_enabled", True),
+            "greeting_chance": cfg.get("greeting_chance", 35),
+            "greeting_check_interval": cfg.get("greeting_check_interval", 30),
+            "morning_boost": cfg.get("morning_boost", 25),
+            "noon_boost": cfg.get("noon_boost", 20),
+            "evening_boost": cfg.get("evening_boost", 20),
+            "night_boost": cfg.get("night_boost", 15),
+            "reply_delay_min": cfg.get("reply_delay_min", 0.5),
+            "reply_delay_max": cfg.get("reply_delay_max", 2.0),
+            "sleep_start_hour": cfg.get("sleep_start_hour", 23),
+            "sleep_end_hour": cfg.get("sleep_end_hour", 7),
+            "sleep_talk_chance": cfg.get("sleep_talk_chance", 15),
+            "sleeping": wants_to_sleep(cfg),
+            "found_bots": list(self._bot_map.keys()),
+            "history_count": len(self._chat_history),
+            "context_zaiens": ctx_z,
+            "context_william": ctx_w,
+        })
+
+    async def _api_get_config(self):
+        return json_response(dict(self.config))
+
+    async def _api_save_config(self):
+        payload = await request.json(default={})
+        if not payload: return error_response("无效请求")
+        for k, v in payload.items():
+            if isinstance(k, str) and k and not k.startswith("_"):
+                self.config[k] = v
+        save_config(self.config)
+        return json_response({"saved": True, "config": dict(self.config)})
+
+    async def _api_do_chat(self):
+        if not self.config.get("group_id"): return error_response("未设置群号")
+        payload = await request.json(default={})
+        seed = payload.get("seed", "") if isinstance(payload, dict) else ""
+        asyncio.create_task(self._do_chat_round(custom_seed=seed, force=True))
+        return json_response({"message": "对话已触发"})
+
+    async def _api_greet(self):
+        if not self.config.get("group_id"): return error_response("未设置群号")
+        asyncio.create_task(self._do_greeting(force=True))
+        return json_response({"message": "问候已触发"})
+
+    async def _api_history(self):
+        limit = request.query.get("limit", 100, type=int)
+        role = request.query.get("role", "all")
+        data = self._chat_history[-limit:]
+        if role != "all": data = [d for d in data if d["role"] == role]
+        return json_response(data)
+
+    async def _api_clear_history(self):
+        self._chat_history.clear()
+        save_history(self._chat_history)
+        logger.info("twinsoul: 历史已清空")
+        return json_response({"cleared": True})
+
+    async def _api_context(self):
+        return json_response(self.context_memory)
+
+    async def _api_clear_context(self):
+        self.context_memory = {"zaiens": [], "william": []}
+        save_context(self.context_memory)
+        logger.info("twinsoul: 上下文已清空")
+        return json_response({"cleared": True})
+
+    async def _api_start(self):
+        if self._running: return json_response({"message": "已在运行"})
+        if not self.config.get("group_id"): return error_response("未设置群号")
+        await self._refresh_bot_map()
+        zq, wq = self.config.get("zaiens_qq", ""), self.config.get("william_qq", "")
+        missing = []
+        if not self._get_bot_by_qq(zq): missing.append("zaiens")
+        if not self._get_bot_by_qq(wq): missing.append("william")
+        if missing: return error_response(f"bot缺失: {', '.join(missing)}")
+        self._running = True
+        self._task = asyncio.create_task(self._timed_loop())
+        return json_response({"message": "已开启"})
+
+    async def _api_stop(self):
+        if not self._running: return json_response({"message": "已停止"})
+        self._running = False
+        if self._task: self._task.cancel(); self._task = None
+        return json_response({"message": "已停止"})
+
+    # ═══════════════════════════════════════════════════════
+    # QQ指令
+    # ═══════════════════════════════════════════════════════
+
+    @filter_mod.command("ts")
+    async def ts(self, event: AstrMessageEvent, action: str = "",
+                 key: str = "", value: str = ""):
+        cmd = action.strip().lower()
+
+        if cmd == "开启":
+            if not self.config.get("group_id"):
+                yield event.plain_result("请先设置 group_id")
+                return
+            if self._running:
+                yield event.plain_result("已在运行")
+                return
+            await self._refresh_bot_map()
+            zq, wq = self.config.get("zaiens_qq", ""), self.config.get("william_qq", "")
+            missing = []
+            if not self._get_bot_by_qq(zq): missing.append(f"扎恩斯({zq})")
+            if not self._get_bot_by_qq(wq): missing.append(f"威廉({wq})")
+            if missing:
+                yield event.plain_result(f"找不到bot: {', '.join(missing)}")
+                return
+            self._running = True
+            self._task = asyncio.create_task(self._timed_loop())
+            yield event.plain_result("双子对话已开启（含定时问候+插话）")
+
+        elif cmd == "关闭":
+            self._running = False
+            if self._task: self._task.cancel(); self._task = None
+            yield event.plain_result("已关闭")
+
+        elif cmd == "对话":
+            if not self.config.get("group_id"):
+                yield event.plain_result("请先设置 group_id"); return
+            seed = " ".join([key, value]).strip() if key else ""
+            yield event.plain_result("双子对话中..." if not seed else f"话题：{seed}")
+            await self._do_chat_round(custom_seed=seed, force=True)
+
+        elif cmd == "问候":
+            if not self.config.get("group_id"):
+                yield event.plain_result("请先设置 group_id"); return
+            yield event.plain_result("问候中...")
+            await self._do_greeting(force=True)
+
+        elif cmd == "重置":
+            self.context_memory = {"zaiens": [], "william": []}
+            save_context(self.context_memory)
+            yield event.plain_result("上下文记忆已清空")
+
+        elif cmd == "状态":
+            await self._refresh_bot_map()
+            ctx_z = len(self.context_memory.get("zaiens", []))
+            ctx_w = len(self.context_memory.get("william", []))
+            h = datetime.now().hour
+            yield event.plain_result(
+                f"【twinsoul v3】\n"
+                f"群: {self.config.get('group_id', '未设置')}\n"
+                f"扎恩斯: {self.config.get('zaiens_qq', '')} ({self.config.get('zaiens_persona', 'zaiens')})\n"
+                f"威廉: {self.config.get('william_qq', '')} ({self.config.get('william_persona', 'william')})\n"
+                f"Bot: {list(self._bot_map.keys())}\n"
+                f"定时: {'开' if self.config.get('enable_timed_chat', True) else '关'} "
+                f"每{self.config.get('chat_interval_minutes', 90)}分\n"
+                f"问候: {'开' if self.config.get('greeting_enabled', True) else '关'} "
+                f"概率{self.config.get('greeting_chance', 35)}% "
+                f"时段加成+{get_time_bonus(self.config)}\n"
+                f"插话概率: {self.config.get('interject_chance', 30)}%\n"
+                f"回复延迟: {self.config.get('reply_delay_min', 0.5)}-{self.config.get('reply_delay_max', 2.0)}分\n"
+                f"睡眠: {self.config.get('sleep_start_hour', 23)}:{'00'}~{self.config.get('sleep_end_hour', 7)}:00 "
+                f"熬夜概率{self.config.get('sleep_talk_chance', 15)}% "
+                f"{'(休息中)' if wants_to_sleep(self.config) else '(清醒)'}\n"
+                f"运行: {'是' if self._running else '否'}\n"
+                f"历史: {len(self._chat_history)}条 | "
+                f"记忆: 扎{ctx_z}条 威{ctx_w}条\n"
+                f"当前时间: {h}:00左右"
+            )
+
+        elif cmd == "设置":
+            valid_keys = [
+                "group_id", "zaiens_qq", "william_qq",
+                "zaiens_persona", "william_persona",
+                "enable_timed_chat", "chat_interval_minutes",
+                "william_initiate_chance", "zaiens_initiate_chance",
+                "context_rounds", "interject_chance",
+                "greeting_enabled", "greeting_chance", "greeting_check_interval",
+                "enable_timed_chat", "chat_interval_minutes",
+                "william_initiate_chance", "zaiens_initiate_chance",
+                "context_rounds", "interject_chance",
+                "greeting_enabled", "greeting_chance", "greeting_check_interval",
+                "morning_boost", "noon_boost", "evening_boost", "night_boost",
+                "reply_delay_min", "reply_delay_max",
+                "sleep_start_hour", "sleep_end_hour", "sleep_talk_chance",
+            ]
+            if not key:
+                yield event.plain_result(f"可用项: {', '.join(valid_keys)}")
+                return
+            if key not in valid_keys:
+                yield event.plain_result(f"无效项: {key}"); return
+            if key in ("enable_timed_chat", "greeting_enabled"):
+                value = value.lower() in ("true", "1", "yes", "开启", "是")
+            elif key in ("reply_delay_min", "reply_delay_max"):
+                try: value = float(value)
+                except: yield event.plain_result("请输入数字"); return
+            elif key in ("chat_interval_minutes", "william_initiate_chance",
+                         "zaiens_initiate_chance", "context_rounds",
+                         "interject_chance", "greeting_chance",
+                         "greeting_check_interval", "morning_boost",
+                         "noon_boost", "evening_boost", "night_boost",
+                         "sleep_start_hour", "sleep_end_hour", "sleep_talk_chance"):
+                try: value = int(value)
+                except: yield event.plain_result("请输入数字"); return
+            self.config[key] = value
+            save_config(self.config)
+            yield event.plain_result(f"已设置 {key} = {value}")
+
+        else:
+            yield event.plain_result(
+                "twinsoul v3 指令:\n"
+                "  /ts 开启 / 关闭\n"
+                "  /ts 对话 [话题]\n"
+                "  /ts 问候（手动触发一次问候）\n"
+                "  /ts 重置（清空记忆）\n"
+                "  /ts 状态\n"
+                "  /ts 设置 <key> <val>\n"
+                "WebUI: 管理面板-插件页"
+            )
+
+    # ═══════════════════════════════════════════════════════
+    # 事件监听：插话（在 _register_message_handler 中注册）
+    # ═══════════════════════════════════════════════════════
+
+    async def on_group_message(self, event: AstrMessageEvent):
+        """监听群消息，触发插话"""
+        if not self._running: return
+        try:
+            await self._maybe_interject(event)
+        except Exception as e:
+            logger.error(f"twinsoul 插话处理异常: {e}")
+
+    async def terminate(self):
+        self._running = False
+        if self._task: self._task.cancel(); self._task = None
+        save_context(self.context_memory)
+        save_history(self._chat_history)
