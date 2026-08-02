@@ -299,7 +299,9 @@ class TwinSoulPlugin(Star):
                          replied_to: str = "") -> Optional[str]:
         await self._simulate_reply_delay()
         try:
-            provider = self.context.get_using_provider()
+            provider = self.context.get_using_provider(
+                umo=f"zaiens:GroupMessage:{group_id}"
+            )
             if not provider: return None
 
             prompt = self._build_prompt(persona_name, seed_text, is_greeting, is_interject, is_long, replied_to)
@@ -349,10 +351,12 @@ class TwinSoulPlugin(Star):
 
     # ─── 一轮对话 ──────────────────────────────────────────
 
-    async def _should_continue_chat(self, last_reply: str) -> bool:
+    async def _should_continue_chat(self, last_reply: str, group_id: str) -> bool:
         """用 LLM 判断对话是否应该继续"""
         try:
-            provider = self.context.get_using_provider()
+            provider = self.context.get_using_provider(
+                umo=f"zaiens:GroupMessage:{group_id}"
+            )
             if not provider: return False
             judge_prompt = f"""判断下面这句话是否是一个话题的自然结束。
 如果是日常闲聊的自然收尾（晚安、先忙了、好的、嗯、哈哈这类），回答 NO。
@@ -437,7 +441,7 @@ class TwinSoulPlugin(Star):
 
             # LLM 判断是否该结束
             if r >= 2:  # 至少聊3轮后再判断
-                should_stop = not await self._should_continue_chat(reply)
+                should_stop = not await self._should_continue_chat(reply, group_id)
                 if should_stop:
                     stop_reason = "llm_judge"; break
 
