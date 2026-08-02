@@ -113,6 +113,36 @@ def get_hour_seed() -> str:
     else:
         return random.choice(SEEDS)
 
+def get_time_context() -> str:
+    """根据真实时间生成角色视角的情景描述（不直接报数字时间）"""
+    now = datetime.now()
+    h = now.hour
+    wd = ["一", "二", "三", "四", "五", "六", "日"][now.weekday()]
+    if 5 <= h < 9:
+        period = "大清早"
+    elif 9 <= h < 11:
+        period = "上午"
+    elif 11 <= h < 14:
+        period = "中午"
+    elif 14 <= h < 17:
+        period = "下午"
+    elif 17 <= h < 19:
+        period = "傍晚"
+    elif 19 <= h < 23:
+        period = "晚上"
+    else:
+        period = "深夜"
+    parts = [f"{period}，星期{wd}"]
+    if 11 <= h < 13:
+        parts.append("到饭点了")
+    elif 17 <= h < 20:
+        parts.append("快到饭点了")
+    elif 21 <= h < 23:
+        parts.append("夜已深，该收摊歇息了")
+    elif h >= 23 or h < 5:
+        parts.append("夜深人静，都歇下了")
+    return "、".join(parts)
+
 def get_time_bonus(cfg: dict) -> int:
     """获取当前时段的额外概率加成"""
     h = datetime.now().hour
@@ -281,6 +311,7 @@ class TwinSoulPlugin(Star):
         lines.append("")
 
         lines.append("=== 当前 ===")
+        lines.append(f"【时间情景】{get_time_context()}。顺着这个情景说话，但别直接报几点几分。")
         if replied_to:
             lines.append(f"刚才{replied_to}说了话，你回应一句。")
         elif is_greeting:
