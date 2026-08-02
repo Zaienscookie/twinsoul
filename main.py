@@ -252,7 +252,7 @@ class TwinSoulPlugin(Star):
         # persona_name 可能是 '111'/'William'（数据库ID），映射到记忆key
         mem_key = "zaiens" if persona_name in ("zaiens", "111") else "william"
         memory = self.context_memory.get(mem_key, [])
-        ctx_rounds = self.config.get("context_rounds", 5)
+        ctx_rounds = self.config.get("context_rounds", 12)
         recent = memory[-(ctx_rounds * 2):] if len(memory) > ctx_rounds * 2 else memory
 
         # 从数据库获取原始人格设定原文
@@ -270,9 +270,10 @@ class TwinSoulPlugin(Star):
 
         if recent:
             lines.append("=== 最近聊天 ===")
-            for entry in recent[-6:]:
+            for entry in recent:
                 rn = "扎恩斯" if entry["role"] == "zaiens" else "威廉"
-                lines.append(f"{rn}: {entry['text']}")
+                txt = entry["text"].replace("\n", " ").strip()[:50]
+                lines.append(f"{rn}: {txt}")
             lines.append("")
 
         lines.append("=== 说话要求 ===")
@@ -319,7 +320,8 @@ class TwinSoulPlugin(Star):
             )
 
             if ret and ret.completion_text:
-                reply = ret.completion_text.strip().split("\n")[0][:60]
+                reply = ret.completion_text.strip().replace("【END】", "").replace("[END]", "").strip()
+                reply = reply.split("\n")[0].strip()[:80]
                 if len(reply) < 2: return None
                 bot = self._get_bot_by_qq(qq)
                 if not bot: return None
@@ -445,6 +447,14 @@ class TwinSoulPlugin(Star):
                 is_long=True, replied_to=last_reply,
                 use_delay=not force
             )
+            # 失败重试一次，避免对话硬断
+            if not reply:
+                await asyncio.sleep(3)
+                reply = await self._speak_as(
+                    group_id, qq, pn, seed,
+                    is_long=True, replied_to=last_reply,
+                    use_delay=False
+                )
             if not reply:
                 stop_reason = "no_reply"; break
 
@@ -452,15 +462,15 @@ class TwinSoulPlugin(Star):
             self._update_context(pn, reply, role)
             last_reply = reply
 
-            # LLM 判断是否该结束
-            if r >= 2:  # 至少聊3轮后再判断
+            # LLM 判断是否该结束（聊得够久才问，省一半调用）
+            if r >= 3:
                 should_stop = not await self._should_continue_chat(reply, group_id)
                 if should_stop:
                     stop_reason = "llm_judge"; break
 
-            # 安全阀：如果回复包含明显的结束词
-            end_words = ["先忙了", "晚安", "先下了", "88", "拜拜", "好的", "嗯嗯", "哈哈"]
-            if any(w in reply for w in end_words) and r >= 3:
+            # 安全阀：明显告别词（去掉误杀的应承词）
+            end_words = ["先忙了", "晚安", "先下了", "88", "拜拜", "不聊了", "下了"]
+            if any(w in reply for w in end_words):
                 stop_reason = "end_word"; break
 
         logger.info(f"twinsoul: 对话结束，共{r+1}轮，原因={stop_reason}")

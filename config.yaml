@@ -1,5 +1,5 @@
 chat_interval_minutes: 90
-context_rounds: 5
+context_rounds: 12
 delay_long_chance: 20
 delay_long_max_sec: 180
 delay_long_min_sec: 60
