@@ -3,3 +3,4 @@ __pycache__/
 chat_history.json
 context_memory.json
 data/
+schedule.json

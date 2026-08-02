@@ -16,6 +16,8 @@ max_chat_rounds: 8
 morning_boost: 25
 night_boost: 15
 noon_boost: 20
+reply_delay_max: 2
+reply_delay_min: 0.5
 sleep_end_hour: 7
 sleep_start_hour: 23
 sleep_talk_chance: 15
@@ -25,3 +27,4 @@ william_qq: '691884347'
 zaiens_initiate_chance: 45
 zaiens_persona: '111'
 zaiens_qq: '3608907727'
+schedule_enabled: true

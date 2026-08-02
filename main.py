@@ -37,6 +37,7 @@ BASE_DIR = os.path.dirname(__file__)
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 HISTORY_PATH = os.path.join(BASE_DIR, "chat_history.json")
 CONTEXT_PATH = os.path.join(BASE_DIR, "context_memory.json")
+SCHEDULE_PATH = os.path.join(BASE_DIR, "schedule.json")
 
 # ─── 工具函数 ──────────────────────────────────────────────
 
@@ -117,6 +118,93 @@ def get_hour_seed() -> str:
     else:
         return random.choice(SEEDS)
 
+# ─── 每日日程（酒馆的一天）────────────────────────────────
+# (窗口起, 窗口止, 标题, 固定?, 细节)  固定=时间钉死，浮动=窗内随机
+SCHEDULE_TEMPLATE = [
+    ("05:30", "06:30", "起床", True, "煮一壶俄式浓茶，把楼梯口的灯留着"),
+    ("06:00", "07:00", "早市采购", False, "去城南码头进货，顺带两份早餐"),
+    ("07:00", "08:30", "备货", False, "擦吧台、摆酒、冰镇啤酒杯"),
+    ("08:30", "11:00", "事务所时段", False, "爱德华整理卷宗，艾文尼尔轮班接委托"),
+    ("11:00", "11:50", "叫扎恩斯起床", False, "上楼喊弟弟吃饭，唠叨两句"),
+    ("12:00", "12:00", "午市开门", True, "开店，简单做几个下酒菜"),
+    ("12:00", "14:00", "午市", False, "扎恩斯调酒，威廉跑堂兼掌勺"),
+    ("14:00", "16:00", "歇午", False, "店里清静，打盹看报"),
+    ("17:00", "17:00", "晚市开门", True, "霓虹亮起来，店里开始上人"),
+    ("17:00", "21:00", "晚市高峰", False, "招呼客人，记着谁爱喝什么"),
+    ("21:00", "22:30", "渐静", False, "客人散场，收拾吧台"),
+    ("22:30", "23:20", "打烊准备", False, "锁门熄灯，水果包一份放冰箱"),
+    ("23:30", "23:30", "打烊", True, "账本合上，上楼睡觉"),
+]
+
+def _hm(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+def _mh(mins: int) -> str:
+    return f"{mins // 60:02d}:{mins % 60:02d}"
+
+def _gen_schedule(date_str: str) -> list:
+    """按日期种子生成当天节点，固定时间钉死、浮动节点窗内随机且递增"""
+    rng = random.Random(f"twinsoul-schedule-{date_str}")
+    nodes = []
+    prev = 0
+    for ws, we, title, fixed, detail in SCHEDULE_TEMPLATE:
+        ws_m, we_m = _hm(ws), _hm(we)
+        if fixed:
+            t = ws_m
+        else:
+            lo = max(ws_m, prev + 2)
+            hi = we_m - 2
+            t = lo if hi <= lo else rng.randint(lo, hi)
+        nodes.append({
+            "time": _mh(t), "title": title, "detail": detail,
+            "fixed": fixed, "status": "pending", "manual": False,
+        })
+        prev = t
+    return nodes
+
+def _save_schedule(data: dict):
+    try:
+        with open(SCHEDULE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"twinsoul: 日程保存失败 {e}")
+
+def _load_schedule() -> dict:
+    """读今日日程，日期不符则重新生成（同一天内多次读取结果一致）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        with open(SCHEDULE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("date") == today:
+            return data
+    except Exception:
+        pass
+    data = {"date": today, "nodes": _gen_schedule(today)}
+    _save_schedule(data)
+    return data
+
+def _refresh_schedule_status(data: dict) -> dict:
+    """按当前时间刷新节点状态（手动标记的节点不覆盖）"""
+    now = datetime.now()
+    cur = now.hour * 60 + now.minute
+    nodes = data.get("nodes", [])
+    active_idx = -1
+    for n in nodes:
+        if n.get("manual"):
+            continue
+        n["status"] = "done" if cur >= _hm(n["time"]) else "pending"
+    # 进行中 = 最后一个时间已到的节点（若当前还没到第一个节点则无进行中）
+    for i, n in enumerate(nodes):
+        if cur >= _hm(n["time"]):
+            active_idx = i
+        else:
+            break
+    if active_idx >= 0 and not nodes[active_idx].get("manual"):
+        nodes[active_idx]["status"] = "active"
+    data["active_idx"] = active_idx
+    return data
+
 def get_time_context() -> str:
     """根据真实时间生成角色视角的情景描述（不直接报数字时间）"""
     now = datetime.now()
@@ -145,6 +233,15 @@ def get_time_context() -> str:
         parts.append("夜已深，该收摊歇息了")
     elif h >= 23 or h < 5:
         parts.append("夜深人静，都歇下了")
+    # 日程注入：当前进行中的事项
+    try:
+        _d = _refresh_schedule_status(_load_schedule())
+        for _n in _d.get("nodes", []):
+            if _n.get("status") == "active":
+                parts.append(f"现在正{_n['title']}（{_n['time']}）")
+                break
+    except Exception:
+        pass
     return "、".join(parts)
 
 def get_time_bonus(cfg: dict) -> int:
@@ -247,6 +344,9 @@ class TwinSoulPlugin(Star):
             ("context/clear",self._api_clear_context, ["POST"]),
             ("history/remove", self._api_remove_history, ["POST"]),
             ("context/remove", self._api_remove_context, ["POST"]),
+            ("schedule",     self._api_schedule,       ["GET"]),
+            ("schedule/toggle", self._api_schedule_toggle, ["POST"]),
+            ("schedule/regen", self._api_schedule_regen, ["POST"]),
             ("start",        self._api_start,         ["POST"]),
             ("stop",         self._api_stop,          ["POST"]),
             ("greet",        self._api_greet,         ["POST"]),
@@ -739,6 +839,28 @@ class TwinSoulPlugin(Star):
     # Web API
     # ═══════════════════════════════════════════════════════
 
+    async def _api_schedule(self):
+        data = _refresh_schedule_status(_load_schedule())
+        _save_schedule(data)
+        return json_response(data)
+
+    async def _api_schedule_toggle(self, id: int = 0):
+        data = _load_schedule()
+        nodes = data.get("nodes", [])
+        if not (0 <= id < len(nodes)):
+            return json_response({"message": "节点不存在"})
+        n = nodes[id]
+        n["manual"] = True
+        n["status"] = "pending" if n["status"] == "done" else "done"
+        _save_schedule(data)
+        return json_response({"message": f"已切换：{n['title']} → {'已完成' if n['status']=='done' else '待开始'}"})
+
+    async def _api_schedule_regen(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        data = {"date": today, "nodes": _gen_schedule(today)}
+        _save_schedule(data)
+        return json_response({"message": "已重新生成今日日程", "schedule": data})
+
     async def _api_status(self):
         await self._refresh_bot_map()
         ctx_z = len(self.context_memory.get("zaiens", []))
@@ -929,6 +1051,15 @@ class TwinSoulPlugin(Star):
             self._emergency_stop = False
             yield event.plain_result("问候中...")
             await self._do_greeting(force=True)
+
+        elif cmd in ("日程", "schedule"):
+            data = _refresh_schedule_status(_load_schedule())
+            _save_schedule(data)
+            marks = {"pending": "⏳", "active": "▶️", "done": "✅"}
+            lines = [f"📅 今日日程（{data['date']}）"]
+            for n in data.get("nodes", []):
+                lines.append(f"{marks.get(n['status'], '⏳')} {n['time']} {n['title']}")
+            yield event.plain_result("\n".join(lines))
 
         elif cmd == "重置":
             self.context_memory = {"zaiens": [], "william": []}

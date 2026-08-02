@@ -56,6 +56,41 @@ async function fetchStatus() {
     } catch (e) { $("sb-running").textContent = "❌ 连接失败"; console.error(e); }
 }
 
+// ─── 今日日程 ──────────────────────────────────────────
+async function fetchSchedule() {
+    try {
+        const s = await bridge.apiGet("schedule");
+        $("#schedule-date").textContent = s.date || "";
+        const list = $("#schedule-list");
+        list.innerHTML = "";
+        const marks = {pending: "⏳", active: "▶️", done: "✅"};
+        const stTxt = {pending: "待开始", active: "进行中", done: "已完成"};
+        (s.nodes || []).forEach((n, i) => {
+            const row = document.createElement("div");
+            row.className = "schedule-row" + (n.status === "active" ? " active" : "");
+            row.innerHTML = `<span class="s-time">${esc(n.time)}</span>
+                <span class="s-title">${esc(n.title)}${n.fixed ? ' <span class="badge">固定</span>' : ""}
+                    <small class="s-detail">${esc(n.detail || "")}</small></span>
+                <span class="s-status s-${n.status}">${marks[n.status] || "⏳"} ${stTxt[n.status] || n.status}</span>
+                <button class="btn btn-sm" data-idx="${i}">${n.status === "done" ? "↩ 恢复" : "✓ 完成"}</button>`;
+            row.querySelector("button").addEventListener("click", () => toggleSchedule(i));
+            list.appendChild(row);
+        });
+        if (!(s.nodes || []).length) list.innerHTML = '<div class="empty">暂无日程</div>';
+    } catch (e) { console.error(e); }
+}
+async function toggleSchedule(idx) {
+    try {
+        const r = await bridge.apiPost("schedule/toggle", { id: idx });
+        showMsg($("schedule-msg"), r.message, "success"); fetchSchedule();
+    } catch (e) { showMsg($("schedule-msg"), "操作失败", "error"); }
+}
+$("btn-regen-schedule").addEventListener("click", async () => {
+    try { const r = await bridge.apiPost("schedule/regen"); showMsg($("schedule-msg"), r.message, "success"); fetchSchedule(); }
+    catch (e) { showMsg($("schedule-msg"), "生成失败", "error"); }
+});
+$("btn-refresh-schedule").addEventListener("click", fetchSchedule);
+
 // ─── 历史 ────────────────────────────────────────────────
 
 async function fetchHistory(filter = "all") {
@@ -218,8 +253,8 @@ document.querySelectorAll("#tab-history .filter-btn").forEach(btn => {
 
 // ─── 初始化 ──────────────────────────────────────────────
 
-await fetchStatus(); await fetchHistory(); await fetchContext();
-setInterval(fetchStatus, 20000);
+await fetchStatus(); await fetchHistory(); await fetchContext(); await fetchSchedule();
+setInterval(fetchStatus, 20000); setInterval(fetchSchedule, 60000);
 setInterval(() => {
     if (document.getElementById("tab-history").classList.contains("active")) {
         const a = document.querySelector("#tab-history .filter-btn.active");
