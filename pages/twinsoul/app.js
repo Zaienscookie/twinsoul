@@ -72,6 +72,7 @@ async function fetchHistory(filter = "all") {
                 <span class="role ${item.role}">${name}</span>
                 <span class="text">${esc(item.text)}</span>
                 <span class="time">${typeLabel} ${timeStr(item.time)}</span>
+                <button class="btn-del" data-del="history" data-index="${item.index}" title="删除这条">✕</button>
             </div>`;
         }).join("");
     } catch (e) { console.error(e); }
@@ -89,7 +90,7 @@ async function fetchContext() {
             if (arr.length === 0) { el.innerHTML = '<div class="empty">无记忆</div>'; return; }
             el.innerHTML = arr.map(item => {
                 const name = item.role === "zaiens" ? "扎恩斯" : "威廉";
-                return `<div class="context-item ${item.role}"><strong>${name}</strong>：${esc(item.text)}<div class="ctx-time">${ctxTimeStr(item.time)}</div></div>`;
+                return `<div class="context-item ${item.role}"><strong>${name}</strong>：${esc(item.text)}<div class="ctx-time">${ctxTimeStr(item.time)}</div><button class="btn-del" data-del="context" data-role="${item.role}" data-index="${item.index}" title="删除这条">✕</button></div>`;
             }).join("");
         };
         render(zaiens, "ctx-zaiens"); render(william, "ctx-william");
@@ -185,6 +186,27 @@ $("btn-clear-context").addEventListener("click", async () => {
     if (!confirm("清空记忆？双子会忘记之前聊过什么。")) return;
     try { await bridge.apiPost("context/clear"); showMsg($("control-msg"), "记忆已清空", "success"); fetchContext(); }
     catch (e) { showMsg($("control-msg"), e.message, "error"); }
+});
+$("btn-clear-memory").addEventListener("click", async () => {
+    if (!confirm("清空记忆？双子会忘记之前聊过什么。")) return;
+    try { await bridge.apiPost("context/clear"); showMsg($("control-msg"), "记忆已清空", "success"); fetchContext(); }
+    catch (e) { showMsg($("control-msg"), e.message, "error"); }
+});
+
+// 单条删除（事件委托）
+document.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".btn-del");
+    if (!btn) return;
+    const idx = parseInt(btn.dataset.index);
+    if (btn.dataset.del === "history") {
+        if (!confirm("删除这条历史？")) return;
+        try { await bridge.apiPost("history/remove", { index: idx }); showMsg($("control-msg"), "已删除", "success"); fetchHistory(); }
+        catch (err) { showMsg($("control-msg"), err.message || "删除失败", "error"); }
+    } else if (btn.dataset.del === "context") {
+        if (!confirm("删除这条记忆？")) return;
+        try { await bridge.apiPost("context/remove", { role: btn.dataset.role, index: idx }); showMsg($("control-msg"), "已删除", "success"); fetchContext(); }
+        catch (err) { showMsg($("control-msg"), err.message || "删除失败", "error"); }
+    }
 });
 
 document.querySelectorAll("#tab-history .filter-btn").forEach(btn => {

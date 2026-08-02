@@ -71,6 +71,10 @@ def load_context() -> dict:
     except: return {"zaiens": [], "william": []}
 
 def save_context(ctx: dict):
+    # 容量保护：每角色最多200条，防磁盘写爆
+    for k in list(ctx.keys()):
+        if isinstance(ctx[k], list) and len(ctx[k]) > 200:
+            ctx[k] = ctx[k][-200:]
     with open(CONTEXT_PATH, "w", encoding="utf-8") as f:
         json.dump(ctx, f, ensure_ascii=False, indent=2)
 
@@ -227,6 +231,8 @@ class TwinSoulPlugin(Star):
             ("history/clear",self._api_clear_history, ["POST"]),
             ("context",      self._api_context,       ["GET"]),
             ("context/clear",self._api_clear_context, ["POST"]),
+            ("history/remove", self._api_remove_history, ["POST"]),
+            ("context/remove", self._api_remove_context, ["POST"]),
             ("start",        self._api_start,         ["POST"]),
             ("stop",         self._api_stop,          ["POST"]),
             ("greet",        self._api_greet,         ["POST"]),
@@ -754,11 +760,17 @@ class TwinSoulPlugin(Star):
         return json_response({"message": "问候已触发"})
 
     async def _api_history(self):
-        limit = request.query.get("limit", 100, type=int)
+        limit = request.query.get("limit", 200, type=int)
         role = request.query.get("role", "all")
-        data = self._chat_history[-limit:]
-        if role != "all": data = [d for d in data if d["role"] == role]
-        return json_response(data)
+        src = self._chat_history
+        start = max(0, len(src) - limit)
+        out = []
+        for i in range(start, len(src)):
+            d = src[i]
+            if role != "all" and d.get("role") != role:
+                continue
+            out.append({"index": i, **d})
+        return json_response(out)
 
     async def _api_clear_history(self):
         self._chat_history.clear()
@@ -767,13 +779,38 @@ class TwinSoulPlugin(Star):
         return json_response({"cleared": True})
 
     async def _api_context(self):
-        return json_response(self.context_memory)
+        out = {}
+        for role, arr in self.context_memory.items():
+            out[role] = [{"index": i, **d} for i, d in enumerate(arr)]
+        return json_response(out)
 
     async def _api_clear_context(self):
         self.context_memory = {"zaiens": [], "william": []}
         save_context(self.context_memory)
         logger.info("twinsoul: 上下文已清空")
         return json_response({"cleared": True})
+
+    async def _api_remove_history(self):
+        payload = await request.json(default={})
+        idx = payload.get("index")
+        if not isinstance(idx, int) or not (0 <= idx < len(self._chat_history)):
+            return error_response("无效索引")
+        removed = self._chat_history.pop(idx)
+        save_history(self._chat_history)
+        logger.info(f"twinsoul: 删除历史 #{idx}: {str(removed.get('text',''))[:30]}")
+        return json_response({"removed": True})
+
+    async def _api_remove_context(self):
+        payload = await request.json(default={})
+        role = payload.get("role", "")
+        idx = payload.get("index")
+        arr = self.context_memory.get(role)
+        if not isinstance(arr, list) or not isinstance(idx, int) or not (0 <= idx < len(arr)):
+            return error_response("无效参数")
+        removed = arr.pop(idx)
+        save_context(self.context_memory)
+        logger.info(f"twinsoul: 删除记忆 {role} #{idx}: {str(removed.get('text',''))[:30]}")
+        return json_response({"removed": True})
 
     async def _api_start(self):
         if self._running: return json_response({"message": "已在运行"})

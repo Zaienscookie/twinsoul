@@ -111,3 +111,8 @@ header h1 {
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: #0f0f1a; }
 ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+.btn-del { background: none; border: none; color: #ef4444; cursor: pointer; font-size: 12px; padding: 0 4px; opacity: .5; margin-left: 6px; }
+.btn-del:hover { opacity: 1; }
+.context-item { display: flex; align-items: flex-start; }
+.context-item .ctx-time { margin-right: auto; }
+.history-item .text { flex: 1; }
