@@ -312,21 +312,47 @@ class TwinSoulPlugin(Star):
             if not provider: return None
 
             prompt = self._build_prompt(persona_name, seed_text, is_greeting, is_interject, is_long, replied_to)
+            dbg = self.config.get("debug_log", True)
 
+            if dbg:
+                scene = ("问候" if is_greeting else "插话" if is_interject else
+                         "续聊" if is_long else "话题" if seed_text else "日常")
+                pname = getattr(provider, "provider_name", None) or type(provider).__name__
+                logger.info(f"[twinsoul] ▶ {persona_name} 发言 | 情景={scene} | 回复对象={replied_to or '-'} | 延迟={'开' if use_delay else '关'} | provider={pname}")
+                logger.info(f"[twinsoul]   prompt({len(prompt)}字):\n{prompt}")
+
+            t0 = time.time()
             ret = await provider.text_chat(
                 prompt=prompt,
                 session_id=f"twinsoul_{persona_name}_{group_id}",
                 contexts=[], image_urls=[],
             )
+            cost = time.time() - t0
 
             if ret and ret.completion_text:
+                if dbg:
+                    rc = getattr(ret, "reasoning_content", None)
+                    if rc:
+                        logger.info(f"[twinsoul]   🧠思维链({persona_name}): {str(rc)[:500]}")
+                    usage = getattr(ret, "usage", None)
+                    if usage:
+                        tin = (getattr(usage, "input_other", 0) or 0) + (getattr(usage, "input_cached", 0) or 0)
+                        tout = getattr(usage, "output", 0) or 0
+                        logger.info(f"[twinsoul]   ⓪耗时{cost:.1f}s | tokens in={tin} out={tout}")
+                    else:
+                        logger.info(f"[twinsoul]   ⓪耗时{cost:.1f}s")
+                    logger.info(f"[twinsoul]   原始回复: {ret.completion_text[:200]}")
                 reply = ret.completion_text.strip().replace("【END】", "").replace("[END]", "").strip()
                 reply = reply.split("\n")[0].strip()[:80]
                 if len(reply) < 2: return None
                 bot = self._get_bot_by_qq(qq)
                 if not bot: return None
                 await bot.call_action("send_group_msg", group_id=int(group_id), message=reply)
+                if dbg:
+                    logger.info(f"[twinsoul] ✓ 已发送({persona_name}): {reply}")
                 return reply
+            if dbg:
+                logger.info(f"[twinsoul] ✗ {persona_name} 无回复 (耗时{cost:.1f}s)")
             return None
         except Exception as e:
             logger.error(f"twinsoul _speak_as 出错: {e}")
@@ -385,7 +411,10 @@ class TwinSoulPlugin(Star):
             )
             if ret and ret.completion_text:
                 result = ret.completion_text.strip().upper()
-                return "YES" in result
+                go = "YES" in result
+                if self.config.get("debug_log", True):
+                    logger.info(f"[twinsoul]   结束判断: 「{last_reply[:30]}」→ {'继续聊' if go else '结束'}")
+                return go
             return False
         except:
             return False
@@ -428,6 +457,8 @@ class TwinSoulPlugin(Star):
             second_speaker_qq, second_speaker_persona = wq, wp
             second_speaker_role = "william"
 
+        if self.config.get("debug_log", True):
+            logger.info(f"[twinsoul] === 对话轮开始 | 发起={first_speaker_role} | seed={seed[:30]} | 上限{max_rounds}轮 ===")
         first = await self._speak_as(group_id, first_speaker_qq, first_speaker_persona, seed, use_delay=not force)
         if not first: return
         round_data.append({"time": ts, "role": first_speaker_role, "text": first, "qq": first_speaker_qq})
@@ -437,6 +468,8 @@ class TwinSoulPlugin(Star):
         # 长对话循环
         for r in range(max_rounds):
             await asyncio.sleep(random.uniform(2, 6))
+            if self.config.get("debug_log", True):
+                logger.info(f"[twinsoul] --- 轮次{r} | 说话={role} ---")
             is_second = (r % 2 == 0)
             qq = second_speaker_qq if is_second else first_speaker_qq
             pn = second_speaker_persona if is_second else first_speaker_persona
