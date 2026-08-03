@@ -60,14 +60,14 @@ async function fetchStatus() {
 async function fetchSchedule() {
     try {
         const s = await bridge.apiGet("schedule");
-        $("#schedule-date").textContent = s.date || "";
-        const list = $("#schedule-list");
+        $("schedule-date").textContent = s.date || "";
+        const list = $("schedule-list");
         list.innerHTML = "";
         const marks = {pending: "⏳", active: "▶️", done: "✅"};
         const stTxt = {pending: "待开始", active: "进行中", done: "已完成"};
         (s.nodes || []).forEach((n, i) => {
             const row = document.createElement("div");
-            row.className = "schedule-row" + (n.status === "active" ? " active" : "");
+            row.className = "schedule-row" + (n.status === "active" ? " active" : "") + (n.status === "done" ? " done" : "");
             row.innerHTML = `<span class="s-time">${esc(n.time)}</span>
                 <span class="s-title">${esc(n.title)}${n.fixed ? ' <span class="badge">固定</span>' : ""}
                     <small class="s-detail">${esc(n.detail || "")}</small></span>

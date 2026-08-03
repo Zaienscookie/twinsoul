@@ -128,4 +128,8 @@ header h1 {
 .s-status { font-size: .82em; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
 .s-pending { color: #f59e0b; background: rgba(245,158,11,.12); }
 .s-active  { color: #60a5fa; background: rgba(96,165,250,.15); }
-.s-done    { color: #22c55e; background: rgba(34,197,94,.12); }
+.s-done    { color: #6b7280; background: rgba(107,114,128,.12); }
+.schedule-row.done { opacity: .55; border-color: #2a2a4a; }
+.schedule-row.done .s-time { color: #6b7280; }
+.schedule-row.done .s-title { color: #9ca3af; }
+.schedule-row.done .s-detail { color: #6b7280; }
