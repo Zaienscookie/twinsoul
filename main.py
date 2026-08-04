@@ -1,5 +1,5 @@
 """
-twinsoul v3 - 双子Soul插件（完整版）
+twinsoul v3.2.0 - 双子Soul插件
 让尤里家双子（扎恩斯 & 威廉）在群聊中进行有记忆的长对话
 
 核心特性:
@@ -507,22 +507,24 @@ class TwinSoulPlugin(Star):
             await asyncio.sleep(1800)
 
     async def _auto_start(self):
-        """插件加载后自动开启：等 3 秒让 provider/bot 就绪，再启动定时循环"""
+        """开机自开启：等 provider/bot 就绪后启动定时循环；bot 未就绪则每 60s 重试，最多 10 次"""
         try:
-            await asyncio.sleep(3)
-            if self._running:
-                return
-            await self._refresh_bot_map()
-            zq = self.config.get("zaiens_qq", "")
-            wq = self.config.get("william_qq", "")
-            if not self._get_bot_by_qq(zq) or not self._get_bot_by_qq(wq):
-                logger.warning("twinsoul 自动启动: 未找到双子 bot，等待下一次重载")
-                return
-            self._running = True
-            self._task = asyncio.create_task(self._timed_loop())
-            if not getattr(self, "_schedule_task", None) or self._schedule_task.done():
-                self._schedule_task = asyncio.create_task(self._schedule_daily_loop())
-            logger.info("twinsoul 已自动开启（定时对话+插话+每日日程）")
+            for attempt in range(10):
+                await asyncio.sleep(3 if attempt == 0 else 60)
+                if self._running:
+                    return
+                await self._refresh_bot_map()
+                zq = self.config.get("zaiens_qq", "")
+                wq = self.config.get("william_qq", "")
+                if self._get_bot_by_qq(zq) and self._get_bot_by_qq(wq):
+                    self._running = True
+                    self._task = asyncio.create_task(self._timed_loop())
+                    if not getattr(self, "_schedule_task", None) or self._schedule_task.done():
+                        self._schedule_task = asyncio.create_task(self._schedule_daily_loop())
+                    logger.info("twinsoul 已自动开启（定时对话+插话+每日日程）")
+                    return
+                logger.warning(f"twinsoul 自动启动: 未找到双子 bot(第{attempt + 1}/10次)，60s后重试")
+            logger.error("twinsoul 自动启动: 10 次重试仍未找到双子 bot")
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -963,6 +965,12 @@ class TwinSoulPlugin(Star):
             try:
                 now = datetime.now()
 
+                # 先睡满一个对话间隔：开启/启动后不立即对话，到点才开口
+                interval = self.config.get("chat_interval_minutes", 90)
+                await asyncio.sleep(interval * 60)
+                if not self._running:
+                    break
+
                 # 定时对话
                 if self.config.get("enable_timed_chat", True):
                     await self._do_chat_round()
@@ -977,9 +985,6 @@ class TwinSoulPlugin(Star):
                         if random.randint(1, 100) <= total_chance:
                             await self._do_greeting()
                         last_greet_time = time.time()
-
-                interval = self.config.get("chat_interval_minutes", 90)
-                await asyncio.sleep(interval * 60)
 
             except asyncio.CancelledError:
                 break

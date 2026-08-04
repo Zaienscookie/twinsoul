@@ -152,29 +152,10 @@ document.querySelectorAll(".tab").forEach(tab => {
 
 // ─── 事件 ─────────────────────────────────────────────────
 
-$("btn-start").addEventListener("click", async () => {
-    try { const r = await bridge.apiPost("start"); showMsg($("control-msg"), r.message, "success"); fetchStatus(); }
-    catch (e) { showMsg($("control-msg"), e.message, "error"); }
-});
-$("btn-stop").addEventListener("click", async () => {
-    try { const r = await bridge.apiPost("stop"); showMsg($("control-msg"), r.message, "success"); fetchStatus(); }
-    catch (e) { showMsg($("control-msg"), e.message, "error"); }
-});
+// 手动对话测试：只保留"对话一轮"（开启/关闭/问候/指定话题 已移除，开机自开启）
 $("btn-chat").addEventListener("click", async () => {
     try { await bridge.apiPost("chat", {}); showMsg($("control-msg"), "对话已触发", "success");
         setTimeout(fetchHistory, 4000); setTimeout(fetchContext, 5000); setTimeout(fetchStatus, 3000); }
-    catch (e) { showMsg($("control-msg"), e.message, "error"); }
-});
-$("btn-greet").addEventListener("click", async () => {
-    try { await bridge.apiPost("greet"); showMsg($("control-msg"), "问候已触发", "success");
-        setTimeout(fetchHistory, 4000); setTimeout(fetchContext, 5000); }
-    catch (e) { showMsg($("control-msg"), e.message, "error"); }
-});
-$("btn-chat-seed").addEventListener("click", async () => {
-    const seed = $("chat-seed").value.trim();
-    if (!seed) { showMsg($("control-msg"), "请输入话题", "info"); return; }
-    try { await bridge.apiPost("chat", { seed }); showMsg($("control-msg"), `「${seed}」已触发`, "success");
-        $("chat-seed").value = ""; setTimeout(fetchHistory, 4000); setTimeout(fetchContext, 5000); }
     catch (e) { showMsg($("control-msg"), e.message, "error"); }
 });
 
